@@ -4,8 +4,8 @@ import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AppNavigator } from './src/navigation/AppNavigator';
 
-export const APP_VERSION = '1.2.1';
-export const APP_BUILD = 121;
+export const APP_VERSION = '1.3.0';
+export const APP_BUILD = 130;
 
 export default function App() {
   return (
@@ -24,24 +24,8 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#121212',
-  },
-  versionBar: {
-    height: 28,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#181818',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#2C2C2C',
-  },
-  versionText: {
-    color: '#8E8E93',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  appBody: {
-    flex: 1,
-  },
+  container: { flex: 1, backgroundColor: '#121212' },
+  versionBar: { height: 28, justifyContent: 'center', alignItems: 'center', backgroundColor: '#181818', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#2C2C2C' },
+  versionText: { color: '#8E8E93', fontSize: 11, fontWeight: '600' },
+  appBody: { flex: 1 },
 });
