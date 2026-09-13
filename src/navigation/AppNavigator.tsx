@@ -1,6 +1,6 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { NavigationContainer } from '@react-navigation/native';
-import React from 'react';
+import React, { useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { useBybitAccount } from '../hooks/useBybitAccount';
 import { PortfolioScreen } from '../screens/PortfolioScreen';
@@ -13,6 +13,7 @@ import { TradeScreen } from '../screens/TradeScreen';
 const Tab = createBottomTabNavigator();
 
 export const AppNavigator: React.FC = () => {
+  const [selectedTradeSymbol, setSelectedTradeSymbol] = useState('BTCUSDT');
   const {
     credentials,
     account,
@@ -85,7 +86,7 @@ export const AppNavigator: React.FC = () => {
           name="Portfolio"
           options={{ tabBarLabel: 'Portfolio', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📊</Text> }}
         >
-          {() => (
+          {({ navigation }) => (
             <PortfolioScreen
               credentials={credentials}
               account={account}
@@ -96,6 +97,10 @@ export const AppNavigator: React.FC = () => {
               autoRefreshEnabled={autoRefreshEnabled}
               onRefresh={refresh}
               onToggleAutoRefresh={setAutoRefreshEnabled}
+              onOpenTrade={(symbol) => {
+                setSelectedTradeSymbol(symbol);
+                navigation.navigate('Trade');
+              }}
             />
           )}
         </Tab.Screen>
@@ -111,7 +116,7 @@ export const AppNavigator: React.FC = () => {
           name="Trade"
           options={{ tabBarLabel: 'Trade', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚡</Text> }}
         >
-          {() => <TradeScreen credentials={credentials} />}
+          {() => <TradeScreen credentials={credentials} initialSymbol={selectedTradeSymbol} />}
         </Tab.Screen>
 
         <Tab.Screen
