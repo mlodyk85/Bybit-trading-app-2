@@ -39,6 +39,9 @@ interface SpotTicker {
   lastPrice: string;
   bid1Price?: string;
   ask1Price?: string;
+  price24hPcnt?: string;
+  highPrice24h?: string;
+  lowPrice24h?: string;
   turnover24h?: string;
   volume24h?: string;
 }
@@ -46,6 +49,17 @@ interface SpotTicker {
 interface SpotTickerResult {
   category: string;
   list: SpotTicker[];
+}
+
+export interface SpotMarketSnapshot {
+  symbol: string;
+  lastPrice: number;
+  bid: number;
+  ask: number;
+  change24hPct: number;
+  high24h: number;
+  low24h: number;
+  turnover24h: number;
 }
 
 export interface SpotFillSummary {
@@ -223,65 +237,57 @@ export async function bybitPost<T>(
 }
 
 export async function fetchSpotUsdtSymbols(): Promise<string[]> {
-  const result = await bybitPublicGet<SpotInstrumentResult>(
-    '/v5/market/instruments-info',
-    { category: 'spot' }
-  );
-
+  const result = await bybitPublicGet<SpotInstrumentResult>('/v5/market/instruments-info', { category: 'spot' });
   return (result?.list || [])
     .filter((item) => item.quoteCoin === 'USDT' && item.status === 'Trading')
     .map((item) => item.symbol)
     .sort((a, b) => a.localeCompare(b));
 }
 
-export async function fetchSpotLastPrice(symbolInput: string): Promise<number> {
+export async function fetchSpotMarketSnapshot(symbolInput: string): Promise<SpotMarketSnapshot> {
   const symbol = symbolInput.trim().toUpperCase();
-  const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', {
-    category: 'spot',
-    symbol,
-  });
-  const value = Number(result?.list?.[0]?.lastPrice);
-  if (!Number.isFinite(value) || value <= 0) {
+  const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'spot', symbol });
+  const ticker = result?.list?.[0];
+  const lastPrice = Number(ticker?.lastPrice);
+  if (!ticker || !Number.isFinite(lastPrice) || lastPrice <= 0) {
     throw new BybitError(`Nie udało się pobrać ceny ${symbol}.`, 'NO_PRICE');
   }
-  return value;
+  return {
+    symbol,
+    lastPrice,
+    bid: Number(ticker.bid1Price || 0),
+    ask: Number(ticker.ask1Price || 0),
+    change24hPct: (Number(ticker.price24hPcnt || 0) || 0) * 100,
+    high24h: Number(ticker.highPrice24h || 0),
+    low24h: Number(ticker.lowPrice24h || 0),
+    turnover24h: Number(ticker.turnover24h || 0),
+  };
+}
+
+export async function fetchSpotLastPrice(symbolInput: string): Promise<number> {
+  return (await fetchSpotMarketSnapshot(symbolInput)).lastPrice;
 }
 
 async function fetchSpotInstrument(symbolInput: string): Promise<SpotInstrument> {
   const symbol = symbolInput.trim().toUpperCase();
-  const result = await bybitPublicGet<SpotInstrumentResult>('/v5/market/instruments-info', {
-    category: 'spot',
-    symbol,
-  });
+  const result = await bybitPublicGet<SpotInstrumentResult>('/v5/market/instruments-info', { category: 'spot', symbol });
   const instrument = result?.list?.[0];
   if (!instrument) throw new BybitError(`Brak danych instrumentu ${symbol}.`, 'NO_INSTRUMENT');
   return instrument;
 }
 
 export async function fetchWalletBalance(credentials: ApiCredentials): Promise<WalletAccountResult | null> {
-  const result = await bybitGet<WalletBalanceResult>(
-    '/v5/account/wallet-balance',
-    { accountType: 'UNIFIED' },
-    credentials
-  );
+  const result = await bybitGet<WalletBalanceResult>('/v5/account/wallet-balance', { accountType: 'UNIFIED' }, credentials);
   return result?.list?.[0] || null;
 }
 
 export async function fetchLinearPositions(credentials: ApiCredentials): Promise<Position[]> {
-  const result = await bybitGet<PositionListResult>(
-    '/v5/position/list',
-    { category: 'linear', settleCoin: 'USDT' },
-    credentials
-  );
+  const result = await bybitGet<PositionListResult>('/v5/position/list', { category: 'linear', settleCoin: 'USDT' }, credentials);
   return (result?.list || []).filter((p) => parseFloat(p.size) > 0);
 }
 
 export async function fetchInversePositions(credentials: ApiCredentials): Promise<Position[]> {
-  const result = await bybitGet<PositionListResult>(
-    '/v5/position/list',
-    { category: 'inverse' },
-    credentials
-  );
+  const result = await bybitGet<PositionListResult>('/v5/position/list', { category: 'inverse' }, credentials);
   return (result?.list || []).filter((p) => parseFloat(p.size) > 0);
 }
 
@@ -294,7 +300,6 @@ export function normalizeSpotQuoteAmount(value: number): number {
   if (!Number.isFinite(value) || value <= 0 || value > MAX_SPOT_ORDER_USDT) {
     throw new BybitError(`Maksymalna wartość pojedynczej transakcji to ${MAX_SPOT_ORDER_USDT} USDT.`, 'LIMIT');
   }
-
   const truncated = Math.floor((value + Number.EPSILON) * 100) / 100;
   if (truncated <= 0 || truncated > MAX_SPOT_ORDER_USDT) {
     throw new BybitError(`Maksymalna wartość pojedynczej transakcji to ${MAX_SPOT_ORDER_USDT} USDT.`, 'LIMIT');
@@ -312,7 +317,6 @@ export async function placeSpotMarketOrder(
   if (!/^[A-Z0-9]{2,30}USDT$/.test(symbol)) {
     throw new BybitError('Obsługiwane są pary Spot zakończone na USDT, np. BTCUSDT.', 'INVALID_SYMBOL');
   }
-
   const safeQuoteAmount = normalizeSpotQuoteAmount(quoteAmountUsdt);
   const qty = safeQuoteAmount.toFixed(2);
   if (Number(qty) > MAX_SPOT_ORDER_USDT) {
@@ -321,29 +325,11 @@ export async function placeSpotMarketOrder(
 
   const orderLinkId = `app-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
   const startedAt = Date.now();
-  const result = await bybitPost<CreateSpotOrderResult>(
-    '/v5/order/create',
-    {
-      category: 'spot',
-      symbol,
-      side,
-      orderType: 'Market',
-      qty,
-      marketUnit: 'quoteCoin',
-      isLeverage: 0,
-      orderFilter: 'Order',
-      orderLinkId,
-    },
-    credentials
-  );
+  const result = await bybitPost<CreateSpotOrderResult>('/v5/order/create', {
+    category: 'spot', symbol, side, orderType: 'Market', qty, marketUnit: 'quoteCoin', isLeverage: 0, orderFilter: 'Order', orderLinkId,
+  }, credentials);
 
-  return {
-    ...result,
-    requestLatencyMs: Date.now() - startedAt,
-    symbol,
-    side,
-    quoteAmountUsdt: safeQuoteAmount,
-  };
+  return { ...result, requestLatencyMs: Date.now() - startedAt, symbol, side, quoteAmountUsdt: safeQuoteAmount };
 }
 
 function decimalPlaces(value?: string): number {
@@ -359,9 +345,7 @@ export async function placeSpotMarketSellBase(
   baseQtyInput: number
 ): Promise<CreateSpotOrderResult> {
   const symbol = symbolInput.trim().toUpperCase();
-  if (!Number.isFinite(baseQtyInput) || baseQtyInput <= 0) {
-    throw new BybitError('Nieprawidłowa ilość aktywa do sprzedaży.', 'INVALID_QTY');
-  }
+  if (!Number.isFinite(baseQtyInput) || baseQtyInput <= 0) throw new BybitError('Nieprawidłowa ilość aktywa do sprzedaży.', 'INVALID_QTY');
 
   const instrument = await fetchSpotInstrument(symbol);
   const precision = Math.min(12, decimalPlaces(instrument.lotSizeFilter?.basePrecision));
@@ -373,44 +357,18 @@ export async function placeSpotMarketSellBase(
   }
 
   const orderLinkId = `auto-s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
-  return await bybitPost<CreateSpotOrderResult>(
-    '/v5/order/create',
-    {
-      category: 'spot',
-      symbol,
-      side: 'Sell',
-      orderType: 'Market',
-      qty: baseQty.toFixed(precision),
-      marketUnit: 'baseCoin',
-      isLeverage: 0,
-      orderFilter: 'Order',
-      orderLinkId,
-    },
-    credentials
-  );
+  return await bybitPost<CreateSpotOrderResult>('/v5/order/create', {
+    category: 'spot', symbol, side: 'Sell', orderType: 'Market', qty: baseQty.toFixed(precision), marketUnit: 'baseCoin', isLeverage: 0, orderFilter: 'Order', orderLinkId,
+  }, credentials);
 }
 
-export async function fetchSpotExecutions(
-  credentials: ApiCredentials,
-  limit = 50
-): Promise<SpotExecution[]> {
-  const result = await bybitGet<ExecutionListResult>(
-    '/v5/execution/list',
-    { category: 'spot', limit: Math.max(1, Math.min(100, limit)) },
-    credentials
-  );
+export async function fetchSpotExecutions(credentials: ApiCredentials, limit = 50): Promise<SpotExecution[]> {
+  const result = await bybitGet<ExecutionListResult>('/v5/execution/list', { category: 'spot', limit: Math.max(1, Math.min(100, limit)) }, credentials);
   return result?.list || [];
 }
 
-export async function fetchSpotOrderExecutions(
-  credentials: ApiCredentials,
-  orderId: string
-): Promise<SpotExecution[]> {
-  const result = await bybitGet<ExecutionListResult>(
-    '/v5/execution/list',
-    { category: 'spot', orderId, limit: 100 },
-    credentials
-  );
+export async function fetchSpotOrderExecutions(credentials: ApiCredentials, orderId: string): Promise<SpotExecution[]> {
+  const result = await bybitGet<ExecutionListResult>('/v5/execution/list', { category: 'spot', orderId, limit: 100 }, credentials);
   return result?.list || [];
 }
 
@@ -436,11 +394,7 @@ export function summarizeSpotExecutions(rows: SpotExecution[]): SpotFillSummary 
   };
 }
 
-export async function waitForSpotFill(
-  credentials: ApiCredentials,
-  orderId: string,
-  timeoutMs = 15000
-): Promise<SpotFillSummary> {
+export async function waitForSpotFill(credentials: ApiCredentials, orderId: string, timeoutMs = 15000): Promise<SpotFillSummary> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const rows = await fetchSpotOrderExecutions(credentials, orderId);
