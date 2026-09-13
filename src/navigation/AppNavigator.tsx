@@ -103,7 +103,7 @@ export const AppNavigator: React.FC = () => {
           name="Positions"
           options={{ tabBarLabel: 'Pozycje', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📈</Text> }}
         >
-          {() => <PositionsScreen positions={positions} isRefreshing={isRefreshing} onRefresh={refresh} />}
+          {() => <PositionsScreen positions={positions} account={account} isRefreshing={isRefreshing} onRefresh={refresh} />}
         </Tab.Screen>
 
         <Tab.Screen

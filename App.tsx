@@ -1,15 +1,23 @@
 import { StatusBar } from 'expo-status-bar';
 import React from 'react';
-import { SafeAreaView, StyleSheet } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { StyleSheet, Text, View } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AppNavigator } from './src/navigation/AppNavigator';
+
+export const APP_VERSION = '1.2.0';
+export const APP_BUILD = 120;
 
 export default function App() {
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.container}>
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <StatusBar style="light" backgroundColor="#121212" />
-        <AppNavigator />
+        <View style={styles.versionBar}>
+          <Text style={styles.versionText}>Bybit Trading • v{APP_VERSION} • build {APP_BUILD}</Text>
+        </View>
+        <View style={styles.appBody}>
+          <AppNavigator />
+        </View>
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -19,5 +27,21 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#121212',
+  },
+  versionBar: {
+    height: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#181818',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#2C2C2C',
+  },
+  versionText: {
+    color: '#8E8E93',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  appBody: {
+    flex: 1,
   },
 });

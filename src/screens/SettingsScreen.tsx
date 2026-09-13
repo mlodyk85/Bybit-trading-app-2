@@ -89,15 +89,13 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
     <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
       <Text style={styles.headerTitle}>Ustawienia</Text>
 
-      {/* Info Read-Only Banner */}
       <View style={styles.readOnlyBanner}>
-        <Text style={styles.readOnlyBadge}>READ-ONLY MODE</Text>
+        <Text style={styles.readOnlyBadge}>SPOT TRADING MODE</Text>
         <Text style={styles.readOnlyText}>
-          Aplikacja działa wyłącznie w trybie odczytu. Składanie zleceń, zamykanie pozycji oraz wypłaty są wyłączone.
+          Klucz API może mieć uprawnienie Spot Trade. Withdrawal/Wypłaty pozostaw wyłączone. Każde zlecenie aplikacji ma twardy limit 10 USDT.
         </Text>
       </View>
 
-      {/* Status Section */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Status Połączenia API</Text>
         <View style={styles.statusBox}>
@@ -117,7 +115,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </View>
       </View>
 
-      {/* Auto-refresh interval selection */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Częstotliwość Auto-Refresh</Text>
         <View style={styles.intervalRow}>
@@ -143,7 +140,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </View>
       </View>
 
-      {/* Change Keys Section */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Edycja Klucza API</Text>
 
@@ -205,7 +201,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </View>
       </View>
 
-      {/* Danger Zone / Clear Credentials */}
       <View style={[styles.section, styles.dangerSection]}>
         <Text style={styles.dangerTitle}>Strefa Bezpieczeństwa</Text>
         <Text style={styles.dangerDescription}>
