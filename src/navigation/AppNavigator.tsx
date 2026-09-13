@@ -87,6 +87,7 @@ export const AppNavigator: React.FC = () => {
         >
           {() => (
             <PortfolioScreen
+              credentials={credentials}
               account={account}
               connectionState={connectionState}
               errorMessage={errorMessage}
