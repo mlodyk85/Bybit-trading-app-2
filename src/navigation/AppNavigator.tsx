@@ -5,8 +5,10 @@ import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { useBybitAccount } from '../hooks/useBybitAccount';
 import { PortfolioScreen } from '../screens/PortfolioScreen';
 import { PositionsScreen } from '../screens/PositionsScreen';
+import { ReportScreen } from '../screens/ReportScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { SetupScreen } from '../screens/SetupScreen';
+import { TradeScreen } from '../screens/TradeScreen';
 
 const Tab = createBottomTabNavigator();
 
@@ -39,7 +41,6 @@ export const AppNavigator: React.FC = () => {
     );
   }
 
-  // If no credentials saved or state is disconnected, show Setup Screen
   if (!credentials || connectionState === 'disconnected') {
     return (
       <SetupScreen
@@ -71,24 +72,18 @@ export const AppNavigator: React.FC = () => {
           tabBarStyle: {
             backgroundColor: '#1E1E1E',
             borderTopColor: '#2C2C2C',
-            height: 60,
-            paddingBottom: 8,
-            paddingTop: 8,
+            height: 62,
+            paddingBottom: 7,
+            paddingTop: 6,
           },
           tabBarActiveTintColor: '#F0B90B',
           tabBarInactiveTintColor: '#8E8E93',
-          tabBarLabelStyle: {
-            fontSize: 12,
-            fontWeight: '600',
-          },
+          tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
         }}
       >
         <Tab.Screen
           name="Portfolio"
-          options={{
-            tabBarLabel: 'Portfolio',
-            tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 18 }}>📊</Text>,
-          }}
+          options={{ tabBarLabel: 'Portfolio', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📊</Text> }}
         >
           {() => (
             <PortfolioScreen
@@ -106,26 +101,28 @@ export const AppNavigator: React.FC = () => {
 
         <Tab.Screen
           name="Positions"
-          options={{
-            tabBarLabel: 'Pozycje',
-            tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 18 }}>📈</Text>,
-          }}
+          options={{ tabBarLabel: 'Pozycje', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📈</Text> }}
         >
-          {() => (
-            <PositionsScreen
-              positions={positions}
-              isRefreshing={isRefreshing}
-              onRefresh={refresh}
-            />
-          )}
+          {() => <PositionsScreen positions={positions} isRefreshing={isRefreshing} onRefresh={refresh} />}
+        </Tab.Screen>
+
+        <Tab.Screen
+          name="Trade"
+          options={{ tabBarLabel: 'Trade', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚡</Text> }}
+        >
+          {() => <TradeScreen credentials={credentials} />}
+        </Tab.Screen>
+
+        <Tab.Screen
+          name="Report"
+          options={{ tabBarLabel: 'Raport', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🧾</Text> }}
+        >
+          {() => <ReportScreen credentials={credentials} />}
         </Tab.Screen>
 
         <Tab.Screen
           name="Settings"
-          options={{
-            tabBarLabel: 'Ustawienia',
-            tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 18 }}>⚙️</Text>,
-          }}
+          options={{ tabBarLabel: 'Ustaw.', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚙️</Text> }}
         >
           {() => (
             <SettingsScreen
@@ -133,9 +130,7 @@ export const AppNavigator: React.FC = () => {
               connectionState={connectionState}
               autoRefreshInterval={autoRefreshInterval}
               onSetAutoRefreshInterval={setAutoRefreshInterval}
-              onUpdateCredentials={async (key, secret) => {
-                return await connect(key, secret, true);
-              }}
+              onUpdateCredentials={async (key, secret) => await connect(key, secret, true)}
               onTestConnection={testConnection}
               onDisconnect={disconnect}
             />
