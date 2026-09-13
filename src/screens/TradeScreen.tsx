@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
+  Modal,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -11,11 +13,28 @@ import {
   View,
 } from 'react-native';
 import { ApiCredentials, TradeAck } from '../api/types';
-import { MAX_SPOT_ORDER_USDT, placeSpotMarketOrder } from '../api/bybit';
+import {
+  fetchSpotUsdtSymbols,
+  MAX_SPOT_ORDER_USDT,
+  placeSpotMarketOrder,
+} from '../api/bybit';
 
 interface Props {
   credentials: ApiCredentials;
 }
+
+const FALLBACK_SYMBOLS = [
+  'BTCUSDT',
+  'ETHUSDT',
+  'SOLUSDT',
+  'XRPUSDT',
+  'DOGEUSDT',
+  'ADAUSDT',
+  'PEPEUSDT',
+  'SUIUSDT',
+  'LINKUSDT',
+  'AVAXUSDT',
+];
 
 export const TradeScreen: React.FC<Props> = ({ credentials }) => {
   const [symbol, setSymbol] = useState('BTCUSDT');
@@ -23,6 +42,41 @@ export const TradeScreen: React.FC<Props> = ({ credentials }) => {
   const [busy, setBusy] = useState(false);
   const [lastAck, setLastAck] = useState<TradeAck | null>(null);
   const [error, setError] = useState('');
+  const [pairPickerOpen, setPairPickerOpen] = useState(false);
+  const [pairSearch, setPairSearch] = useState('');
+  const [pairs, setPairs] = useState<string[]>(FALLBACK_SYMBOLS);
+  const [pairsLoading, setPairsLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    const loadPairs = async () => {
+      try {
+        const result = await fetchSpotUsdtSymbols();
+        if (active && result.length > 0) setPairs(result);
+      } catch {
+        // Fallback list remains available if Bybit public market endpoint is temporarily unavailable.
+      } finally {
+        if (active) setPairsLoading(false);
+      }
+    };
+    void loadPairs();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const filteredPairs = useMemo(() => {
+    const q = pairSearch.trim().toUpperCase();
+    if (!q) return pairs;
+    return pairs.filter((item) => item.includes(q));
+  }, [pairSearch, pairs]);
+
+  const selectPair = (nextSymbol: string) => {
+    setSymbol(nextSymbol);
+    setPairSearch('');
+    setPairPickerOpen(false);
+    setError('');
+  };
 
   const submit = (side: 'Buy' | 'Sell') => {
     const parsed = Number(amount.replace(',', '.'));
@@ -70,15 +124,13 @@ export const TradeScreen: React.FC<Props> = ({ credentials }) => {
         </View>
 
         <Text style={styles.label}>Para</Text>
-        <TextInput
-          value={symbol}
-          onChangeText={setSymbol}
-          autoCapitalize="characters"
-          autoCorrect={false}
-          placeholder="BTCUSDT"
-          placeholderTextColor="#6E6E73"
-          style={styles.input}
-        />
+        <TouchableOpacity style={styles.pairSelector} onPress={() => setPairPickerOpen(true)}>
+          <View>
+            <Text style={styles.pairSelectorValue}>{symbol}</Text>
+            <Text style={styles.pairSelectorHint}>Dotknij, aby wybrać parę z Bybit</Text>
+          </View>
+          <Text style={styles.pairSelectorArrow}>⌄</Text>
+        </TouchableOpacity>
 
         <Text style={styles.label}>Wartość transakcji (USDT)</Text>
         <TextInput
@@ -112,6 +164,59 @@ export const TradeScreen: React.FC<Props> = ({ credentials }) => {
           </View>
         )}
       </ScrollView>
+
+      <Modal visible={pairPickerOpen} animationType="slide" transparent onRequestClose={() => setPairPickerOpen(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Wybierz parę Spot</Text>
+                <Text style={styles.modalSubtitle}>Aktywne pary USDT dostępne na Bybit</Text>
+              </View>
+              <TouchableOpacity onPress={() => setPairPickerOpen(false)} style={styles.closeButton}>
+                <Text style={styles.closeButtonText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TextInput
+              value={pairSearch}
+              onChangeText={setPairSearch}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="Szukaj, np. BTC, ETH, VELO..."
+              placeholderTextColor="#6E6E73"
+              style={styles.searchInput}
+            />
+
+            {pairsLoading && (
+              <View style={styles.loadingPairs}>
+                <ActivityIndicator color="#F0B90B" />
+                <Text style={styles.loadingPairsText}>Pobieranie listy par z Bybit...</Text>
+              </View>
+            )}
+
+            <FlatList
+              data={filteredPairs}
+              keyExtractor={(item) => item}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[styles.pairRow, item === symbol && styles.pairRowSelected]}
+                  onPress={() => selectPair(item)}
+                >
+                  <View>
+                    <Text style={styles.pairRowSymbol}>{item.replace('USDT', '')}</Text>
+                    <Text style={styles.pairRowQuote}>/ USDT</Text>
+                  </View>
+                  {item === symbol && <Text style={styles.selectedMark}>✓</Text>}
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={<Text style={styles.emptyPairs}>Nie znaleziono takiej pary.</Text>}
+              contentContainerStyle={styles.pairListContent}
+            />
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -125,6 +230,10 @@ const styles = StyleSheet.create({
   warningText: { color: '#F0B90B', lineHeight: 20 },
   label: { color: '#D4D4D8', fontSize: 13, marginBottom: 6, marginTop: 10 },
   input: { backgroundColor: '#1E1E1E', color: '#fff', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, fontSize: 17 },
+  pairSelector: { backgroundColor: '#1E1E1E', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: '#333333' },
+  pairSelectorValue: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  pairSelectorHint: { color: '#8E8E93', fontSize: 11, marginTop: 3 },
+  pairSelectorArrow: { color: '#F0B90B', fontSize: 26, fontWeight: '700' },
   error: { color: '#FF6B6B', marginTop: 12 },
   row: { flexDirection: 'row', gap: 12, marginTop: 20 },
   button: { flex: 1, minHeight: 52, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
@@ -135,4 +244,21 @@ const styles = StyleSheet.create({
   cardTitle: { color: '#fff', fontSize: 16, fontWeight: '700', marginBottom: 10 },
   line: { color: '#D4D4D8', marginBottom: 6 },
   note: { color: '#8E8E93', marginTop: 8, lineHeight: 18, fontSize: 12 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.72)', justifyContent: 'flex-end' },
+  modalCard: { height: '82%', backgroundColor: '#181818', borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 18 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
+  modalTitle: { color: '#fff', fontSize: 22, fontWeight: '800' },
+  modalSubtitle: { color: '#8E8E93', fontSize: 12, marginTop: 3 },
+  closeButton: { width: 38, height: 38, borderRadius: 19, backgroundColor: '#2A2A2A', alignItems: 'center', justifyContent: 'center' },
+  closeButtonText: { color: '#fff', fontSize: 18 },
+  searchInput: { backgroundColor: '#242424', color: '#fff', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16, borderWidth: 1, borderColor: '#333333', marginBottom: 10 },
+  loadingPairs: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
+  loadingPairsText: { color: '#8E8E93', marginLeft: 8, fontSize: 12 },
+  pairListContent: { paddingBottom: 24 },
+  pairRow: { minHeight: 58, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#333333', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 8 },
+  pairRowSelected: { backgroundColor: '#26220F' },
+  pairRowSymbol: { color: '#fff', fontSize: 17, fontWeight: '800' },
+  pairRowQuote: { color: '#8E8E93', fontSize: 11, marginTop: 1 },
+  selectedMark: { color: '#F0B90B', fontSize: 20, fontWeight: '800' },
+  emptyPairs: { color: '#8E8E93', textAlign: 'center', paddingVertical: 30 },
 });
