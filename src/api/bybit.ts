@@ -21,12 +21,41 @@ interface SpotInstrument {
   baseCoin: string;
   quoteCoin: string;
   status: string;
+  lotSizeFilter?: {
+    basePrecision?: string;
+    minOrderQty?: string;
+    maxOrderQty?: string;
+  };
 }
 
 interface SpotInstrumentResult {
   category: string;
   list: SpotInstrument[];
   nextPageCursor?: string;
+}
+
+interface SpotTicker {
+  symbol: string;
+  lastPrice: string;
+  bid1Price?: string;
+  ask1Price?: string;
+  turnover24h?: string;
+  volume24h?: string;
+}
+
+interface SpotTickerResult {
+  category: string;
+  list: SpotTicker[];
+}
+
+export interface SpotFillSummary {
+  orderId: string;
+  symbol: string;
+  side: string;
+  baseQty: number;
+  quoteValue: number;
+  avgPrice: number;
+  feeByCurrency: Record<string, number>;
 }
 
 export class BybitError extends Error {
@@ -205,6 +234,30 @@ export async function fetchSpotUsdtSymbols(): Promise<string[]> {
     .sort((a, b) => a.localeCompare(b));
 }
 
+export async function fetchSpotLastPrice(symbolInput: string): Promise<number> {
+  const symbol = symbolInput.trim().toUpperCase();
+  const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', {
+    category: 'spot',
+    symbol,
+  });
+  const value = Number(result?.list?.[0]?.lastPrice);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new BybitError(`Nie udało się pobrać ceny ${symbol}.`, 'NO_PRICE');
+  }
+  return value;
+}
+
+async function fetchSpotInstrument(symbolInput: string): Promise<SpotInstrument> {
+  const symbol = symbolInput.trim().toUpperCase();
+  const result = await bybitPublicGet<SpotInstrumentResult>('/v5/market/instruments-info', {
+    category: 'spot',
+    symbol,
+  });
+  const instrument = result?.list?.[0];
+  if (!instrument) throw new BybitError(`Brak danych instrumentu ${symbol}.`, 'NO_INSTRUMENT');
+  return instrument;
+}
+
 export async function fetchWalletBalance(credentials: ApiCredentials): Promise<WalletAccountResult | null> {
   const result = await bybitGet<WalletBalanceResult>(
     '/v5/account/wallet-balance',
@@ -293,6 +346,50 @@ export async function placeSpotMarketOrder(
   };
 }
 
+function decimalPlaces(value?: string): number {
+  if (!value) return 8;
+  if (value.includes('e-')) return Number(value.split('e-')[1]) || 8;
+  const dot = value.indexOf('.');
+  return dot < 0 ? 0 : value.length - dot - 1;
+}
+
+export async function placeSpotMarketSellBase(
+  credentials: ApiCredentials,
+  symbolInput: string,
+  baseQtyInput: number
+): Promise<CreateSpotOrderResult> {
+  const symbol = symbolInput.trim().toUpperCase();
+  if (!Number.isFinite(baseQtyInput) || baseQtyInput <= 0) {
+    throw new BybitError('Nieprawidłowa ilość aktywa do sprzedaży.', 'INVALID_QTY');
+  }
+
+  const instrument = await fetchSpotInstrument(symbol);
+  const precision = Math.min(12, decimalPlaces(instrument.lotSizeFilter?.basePrecision));
+  const factor = 10 ** precision;
+  const baseQty = Math.floor(baseQtyInput * factor) / factor;
+  const minQty = Number(instrument.lotSizeFilter?.minOrderQty || '0');
+  if (baseQty <= 0 || (minQty > 0 && baseQty < minQty)) {
+    throw new BybitError('Ilość po zaokrągleniu jest mniejsza niż minimum Bybit.', 'MIN_QTY');
+  }
+
+  const orderLinkId = `auto-s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
+  return await bybitPost<CreateSpotOrderResult>(
+    '/v5/order/create',
+    {
+      category: 'spot',
+      symbol,
+      side: 'Sell',
+      orderType: 'Market',
+      qty: baseQty.toFixed(precision),
+      marketUnit: 'baseCoin',
+      isLeverage: 0,
+      orderFilter: 'Order',
+      orderLinkId,
+    },
+    credentials
+  );
+}
+
 export async function fetchSpotExecutions(
   credentials: ApiCredentials,
   limit = 50
@@ -303,4 +400,53 @@ export async function fetchSpotExecutions(
     credentials
   );
   return result?.list || [];
+}
+
+export async function fetchSpotOrderExecutions(
+  credentials: ApiCredentials,
+  orderId: string
+): Promise<SpotExecution[]> {
+  const result = await bybitGet<ExecutionListResult>(
+    '/v5/execution/list',
+    { category: 'spot', orderId, limit: 100 },
+    credentials
+  );
+  return result?.list || [];
+}
+
+export function summarizeSpotExecutions(rows: SpotExecution[]): SpotFillSummary | null {
+  if (!rows.length) return null;
+  let baseQty = 0;
+  let quoteValue = 0;
+  const feeByCurrency: Record<string, number> = {};
+  for (const row of rows) {
+    baseQty += Number(row.execQty) || 0;
+    quoteValue += Number(row.execValue) || 0;
+    const currency = row.feeCurrency || 'UNKNOWN';
+    feeByCurrency[currency] = (feeByCurrency[currency] || 0) + (Number(row.execFee) || 0);
+  }
+  return {
+    orderId: rows[0].orderId,
+    symbol: rows[0].symbol,
+    side: rows[0].side,
+    baseQty,
+    quoteValue,
+    avgPrice: baseQty > 0 ? quoteValue / baseQty : 0,
+    feeByCurrency,
+  };
+}
+
+export async function waitForSpotFill(
+  credentials: ApiCredentials,
+  orderId: string,
+  timeoutMs = 15000
+): Promise<SpotFillSummary> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const rows = await fetchSpotOrderExecutions(credentials, orderId);
+    const summary = summarizeSpotExecutions(rows);
+    if (summary && summary.baseQty > 0) return summary;
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+  throw new BybitError('Bybit nie potwierdził wykonania zlecenia w wymaganym czasie.', 'FILL_TIMEOUT');
 }
