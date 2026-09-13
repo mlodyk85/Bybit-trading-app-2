@@ -16,6 +16,19 @@ const BYBIT_BASE_URL = 'https://api.bybit.com';
 const RECV_WINDOW = 5000;
 export const MAX_SPOT_ORDER_USDT = 10;
 
+interface SpotInstrument {
+  symbol: string;
+  baseCoin: string;
+  quoteCoin: string;
+  status: string;
+}
+
+interface SpotInstrumentResult {
+  category: string;
+  list: SpotInstrument[];
+  nextPageCursor?: string;
+}
+
 export class BybitError extends Error {
   code: number | string;
 
@@ -81,6 +94,25 @@ function normalizeNetworkError(error: unknown): never {
     throw new BybitError('Nie udało się połączyć z Bybit. Sprawdź internet.', 'NETWORK_ERROR');
   }
   throw new BybitError(message || 'Wystąpił nieznany błąd połączenia.', 'UNKNOWN');
+}
+
+async function bybitPublicGet<T>(
+  path: string,
+  params: Record<string, string | number | boolean | undefined | null>
+): Promise<T> {
+  const queryString = buildQueryString(params);
+  const url = queryString ? `${BYBIT_BASE_URL}${path}?${queryString}` : `${BYBIT_BASE_URL}${path}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(url, { method: 'GET', signal: controller.signal });
+    return await parseResponse<T>(response);
+  } catch (error: unknown) {
+    return normalizeNetworkError(error);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export async function bybitGet<T>(
@@ -161,6 +193,18 @@ export async function bybitPost<T>(
   }
 }
 
+export async function fetchSpotUsdtSymbols(): Promise<string[]> {
+  const result = await bybitPublicGet<SpotInstrumentResult>(
+    '/v5/market/instruments-info',
+    { category: 'spot' }
+  );
+
+  return (result?.list || [])
+    .filter((item) => item.quoteCoin === 'USDT' && item.status === 'Trading')
+    .map((item) => item.symbol)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 export async function fetchWalletBalance(credentials: ApiCredentials): Promise<WalletAccountResult | null> {
   const result = await bybitGet<WalletBalanceResult>(
     '/v5/account/wallet-balance',
@@ -193,10 +237,6 @@ export async function testBybitConnection(credentials: ApiCredentials): Promise<
   return true;
 }
 
-/**
- * Normalises a requested USDT notional without ever rounding above the user's value.
- * This is deliberately duplicated as a server-side/API-layer guard instead of relying on UI validation.
- */
 export function normalizeSpotQuoteAmount(value: number): number {
   if (!Number.isFinite(value) || value <= 0 || value > MAX_SPOT_ORDER_USDT) {
     throw new BybitError(`Maksymalna wartość pojedynczej transakcji to ${MAX_SPOT_ORDER_USDT} USDT.`, 'LIMIT');
@@ -209,11 +249,6 @@ export function normalizeSpotQuoteAmount(value: number): number {
   return truncated;
 }
 
-/**
- * Places a SPOT market order quoted in USDT.
- * Hard safety cap: <= 10 USDT per request.
- * No leverage, no margin, no derivatives.
- */
 export async function placeSpotMarketOrder(
   credentials: ApiCredentials,
   symbolInput: string,
