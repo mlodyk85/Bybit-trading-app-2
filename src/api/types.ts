@@ -98,6 +98,8 @@ export interface SpotExecution {
   side: 'Buy' | 'Sell' | string;
   orderType: string;
   execFee: string;
+  feeCurrency?: string;
+  feeRate?: string;
   execId: string;
   execPrice: string;
   execQty: string;
