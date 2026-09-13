@@ -3,10 +3,17 @@ import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { CoinBalance, SpotExecution } from '../api/types';
 import { formatCryptoPrecision, formatCurrency } from '../utils/format';
 
+export interface AssetSmartAutoSeed {
+  symbol: string;
+  baseQty: number;
+  buyPrice: number;
+  buyCostUsdt: number;
+}
+
 interface AssetRowProps {
   asset: CoinBalance;
   executions?: SpotExecution[];
-  onOpenTrade?: (symbol: string) => void;
+  onOpenTrade?: (seed: AssetSmartAutoSeed) => void;
 }
 
 function formatUsdt(value: number): string {
@@ -20,33 +27,41 @@ function formatPrice(value: number): string {
 }
 
 export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [], onOpenTrade }) => {
-  const symbol = `${asset.coin.toUpperCase()}USDT`;
+  const coin = asset.coin.toUpperCase();
+  const symbol = `${coin}USDT`;
   const rows = executions
     .filter((item) => item.symbol.toUpperCase() === symbol)
     .sort((a, b) => Number(b.execTime) - Number(a.execTime));
 
   const lastBuy = rows.find((item) => item.side === 'Buy');
   const lastSell = rows.find((item) => item.side === 'Sell');
-
   const buyValue = lastBuy ? Number(lastBuy.execValue) : NaN;
   const buyPrice = lastBuy ? Number(lastBuy.execPrice) : NaN;
   const sellValue = lastSell ? Number(lastSell.execValue) : NaN;
   const sellPrice = lastSell ? Number(lastSell.execPrice) : NaN;
   const currentValue = Number(asset.usdValue);
+  const walletQty = Number(asset.availableToWithdraw || asset.free || asset.walletBalance || 0);
+  const lastBuyQty = lastBuy ? Number(lastBuy.execQty) : NaN;
+  const baseFee = lastBuy?.feeCurrency?.toUpperCase() === coin ? Number(lastBuy.execFee) || 0 : 0;
+  const quoteFee = lastBuy?.feeCurrency?.toUpperCase() === 'USDT' ? Number(lastBuy.execFee) || 0 : 0;
+  const convertedBaseFee = Number.isFinite(buyPrice) ? baseFee * buyPrice : 0;
+  const managedQty = Number.isFinite(lastBuyQty) ? Math.max(0, Math.min(walletQty, lastBuyQty - baseFee)) : 0;
+  const buyCostUsdt = Number.isFinite(buyValue) ? buyValue + quoteFee + convertedBaseFee : NaN;
   const deltaFromLastBuy = Number.isFinite(currentValue) && Number.isFinite(buyValue) ? currentValue - buyValue : NaN;
-  const tradable = asset.coin.toUpperCase() !== 'USDT';
+  const tradable = coin !== 'USDT';
+  const canOpenSmart = tradable && Boolean(onOpenTrade) && managedQty > 0 && Number.isFinite(buyPrice) && buyPrice > 0 && Number.isFinite(buyCostUsdt) && buyCostUsdt > 0;
 
   return (
     <TouchableOpacity
-      activeOpacity={tradable ? 0.78 : 1}
-      disabled={!tradable || !onOpenTrade}
-      onPress={() => tradable && onOpenTrade?.(symbol)}
+      activeOpacity={canOpenSmart ? 0.78 : 1}
+      disabled={!canOpenSmart}
+      onPress={() => canOpenSmart && onOpenTrade?.({ symbol, baseQty: managedQty, buyPrice, buyCostUsdt })}
       style={styles.container}
     >
       <View style={styles.coinHeader}>
         <View>
           <Text style={styles.coinName}>{asset.coin}</Text>
-          {tradable && <Text style={styles.openHint}>Otwórz {symbol} →</Text>}
+          {canOpenSmart && <Text style={styles.openHint}>SMART AUTO {symbol} →</Text>}
         </View>
         <Text style={styles.usdValue}>{formatCurrency(asset.usdValue, 'USD')}</Text>
       </View>
@@ -56,17 +71,13 @@ export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [], onOp
           <Text style={styles.detailLabel}>Wallet Balance</Text>
           <Text style={styles.detailValue}>{formatCryptoPrecision(asset.walletBalance)}</Text>
         </View>
-
         <View style={styles.detailCol}>
           <Text style={styles.detailLabel}>Equity</Text>
           <Text style={styles.detailValue}>{formatCryptoPrecision(asset.equity)}</Text>
         </View>
-
         <View style={styles.detailColRight}>
           <Text style={styles.detailLabel}>Available</Text>
-          <Text style={styles.detailValue}>
-            {formatCryptoPrecision(asset.availableToWithdraw || asset.free || asset.walletBalance)}
-          </Text>
+          <Text style={styles.detailValue}>{formatCryptoPrecision(asset.availableToWithdraw || asset.free || asset.walletBalance)}</Text>
         </View>
       </View>
 
@@ -74,15 +85,11 @@ export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [], onOp
         <View style={styles.tradeBox}>
           <View style={styles.tradeLine}>
             <Text style={styles.tradeLabel}>Ostatni zakup</Text>
-            <Text style={styles.buyValue}>
-              {lastBuy ? `${formatUsdt(buyValue)} @ ${formatPrice(buyPrice)}` : 'brak danych'}
-            </Text>
+            <Text style={styles.buyValue}>{lastBuy ? `${formatUsdt(buyValue)} @ ${formatPrice(buyPrice)}` : 'brak danych'}</Text>
           </View>
           <View style={styles.tradeLine}>
             <Text style={styles.tradeLabel}>Ostatnia sprzedaż</Text>
-            <Text style={styles.sellValue}>
-              {lastSell ? `${formatUsdt(sellValue)} @ ${formatPrice(sellPrice)}` : 'brak danych'}
-            </Text>
+            <Text style={styles.sellValue}>{lastSell ? `${formatUsdt(sellValue)} @ ${formatPrice(sellPrice)}` : 'brak danych'}</Text>
           </View>
           <View style={styles.tradeLine}>
             <Text style={styles.tradeLabel}>Obecna wartość</Text>
@@ -96,7 +103,9 @@ export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [], onOp
               </Text>
             </View>
           )}
-          <Text style={styles.tradeNote}>Dotknij aktywa, aby przejść od razu do tej pary Spot.</Text>
+          <Text style={styles.tradeNote}>
+            {canOpenSmart ? 'Dotknij aktywa, aby Smart Auto najpierw zarządzał posiadaną ilością, a potem wrócił do USDT i szukał kolejnej okazji.' : 'Brak kompletnego ostatniego BUY — Smart Auto nie będzie automatycznie sprzedawał tej pozycji.'}
+          </Text>
         </View>
       )}
     </TouchableOpacity>
@@ -104,22 +113,10 @@ export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [], onOp
 };
 
 const styles = StyleSheet.create({
-  container: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 8,
-    padding: 12,
-    marginVertical: 4,
-    borderWidth: 1,
-    borderColor: '#2A2A2A',
-  },
-  coinHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
+  container: { backgroundColor: '#1E1E1E', borderRadius: 8, padding: 12, marginVertical: 4, borderWidth: 1, borderColor: '#2A2A2A' },
+  coinHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   coinName: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
-  openHint: { color: '#F0B90B', fontSize: 10, marginTop: 2 },
+  openHint: { color: '#F0B90B', fontSize: 10, marginTop: 2, fontWeight: '800' },
   usdValue: { color: '#F0B90B', fontSize: 14, fontWeight: '600' },
   detailsRow: { flexDirection: 'row', justifyContent: 'space-between' },
   detailCol: { flex: 1 },
