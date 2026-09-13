@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      NODE_ENV: production
 
     steps:
       - name: Checkout repository
@@ -22,7 +24,7 @@ jobs:
           cache: 'npm'
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -40,21 +42,26 @@ jobs:
         run: npm test
 
       - name: Generate Android Native Project (Expo Prebuild)
-        run: npx expo prebuild --platform android --no-install
+        run: npx expo prebuild --platform android --no-install --clean
 
-      - name: Build Android APK (Gradle)
+      - name: Build standalone Release APK with bundled JS
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Verify release APK exists
+        run: |
+          test -f android/app/build/outputs/apk/release/app-release.apk
+          ls -lh android/app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare APK Artifact
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk bybit-trading-app.apk
+          cp android/app/build/outputs/apk/release/app-release.apk bybit-trading-app-release.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bybit-trading-app-apk
-          path: bybit-trading-app.apk
+          name: bybit-trading-app-release-apk
+          path: bybit-trading-app-release.apk
           retention-days: 30
