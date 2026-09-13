@@ -4,8 +4,8 @@ import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AppNavigator } from './src/navigation/AppNavigator';
 
-export const APP_VERSION = '1.2.0';
-export const APP_BUILD = 120;
+export const APP_VERSION = '1.2.1';
+export const APP_BUILD = 121;
 
 export default function App() {
   return (
