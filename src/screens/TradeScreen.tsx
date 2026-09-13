@@ -19,6 +19,7 @@ import {
   fetchSpotMarketSnapshot,
   fetchSpotUsdtMarketCandidates,
   fetchSpotUsdtSymbols,
+  fetchWalletBalance,
   placeSpotMarketOrder,
   placeSpotMarketSellBase,
   SpotMarketCandidate,
@@ -34,13 +35,7 @@ interface Props {
   onHoldingConsumed?: () => void;
 }
 
-interface SmartPosition {
-  symbol: string;
-  qty: number;
-  costUsdt: number;
-  entryPrice: number;
-  fromPortfolio: boolean;
-}
+type SmartMode = 'shadow' | 'assist';
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -49,14 +44,25 @@ interface SmartCandidateScore {
   score: number;
 }
 
+interface TrackedPosition {
+  id: string;
+  symbol: string;
+  qty: number;
+  costUsdt: number;
+  entryPrice: number;
+  peakMovePct: number;
+  currentMovePct: number;
+  currentPnlUsdt: number;
+  sellReady: boolean;
+  fromPortfolio?: boolean;
+}
+
 const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'PEPEUSDT', 'SUIUSDT', 'LINKUSDT', 'AVAXUSDT'];
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
-
-// Smart Auto 1.3.3: decyzje wejścia/wyjścia bazują na ruchu ceny, nie na prowizji.
 const SCAN_SAMPLES = 6;
-const SCAN_INTERVAL_MS = 1500;
+const SCAN_INTERVAL_MS = 1200;
 const MIN_ENTRY_MOMENTUM_PCT = 0.015;
 const MAX_ENTRY_MOMENTUM_PCT = 3;
 const MAX_SPREAD_PCT = 0.35;
@@ -82,17 +88,33 @@ export const TradeScreen: React.FC<Props> = ({
   const [market, setMarket] = useState<SpotMarketSnapshot | null>(null);
 
   const [smartEnabled, setSmartEnabled] = useState(Boolean(initialHolding));
+  const [smartMode, setSmartMode] = useState<SmartMode>('shadow');
   const [smartRunning, setSmartRunning] = useState(false);
-  const [targetProfit, setTargetProfit] = useState('1');
+  const [targetProfit, setTargetProfit] = useState('0');
   const [maxLoss, setMaxLoss] = useState('2');
   const [maxCycles, setMaxCycles] = useState('1000');
+  const [maxSlots, setMaxSlots] = useState('3');
+  const [shadowCapital, setShadowCapital] = useState('25');
+  const [shadowUsdt, setShadowUsdt] = useState(25);
+  const [availableUsdt, setAvailableUsdt] = useState(0);
   const [sessionProfit, setSessionProfit] = useState(0);
   const [cycleCount, setCycleCount] = useState(0);
   const [scanCount, setScanCount] = useState(0);
   const [smartStatus, setSmartStatus] = useState('Gotowy');
   const [scanInfo, setScanInfo] = useState('');
   const [activeScore, setActiveScore] = useState<SmartCandidateScore | null>(null);
+  const [assistCandidate, setAssistCandidate] = useState<SmartCandidateScore | null>(null);
+  const [shadowPositions, setShadowPositions] = useState<TrackedPosition[]>([]);
+  const [livePositions, setLivePositions] = useState<TrackedPosition[]>([]);
+
   const stopRef = useRef(false);
+  const scanCountRef = useRef(0);
+  const shadowPositionsRef = useRef<TrackedPosition[]>([]);
+  const livePositionsRef = useRef<TrackedPosition[]>([]);
+  const assistCandidateRef = useRef<SmartCandidateScore | null>(null);
+  const shadowUsdtRef = useRef(25);
+  const sessionProfitRef = useRef(0);
+  const cycleCountRef = useRef(0);
 
   useEffect(() => {
     if (!smartRunning && initialSymbol) setSymbol(initialSymbol.toUpperCase());
@@ -101,9 +123,7 @@ export const TradeScreen: React.FC<Props> = ({
 
   useEffect(() => {
     const value = toNumber(amount);
-    if (!Number.isFinite(value) || value <= 0 || value > maxOrderUsdt) {
-      setAmount(String(Math.min(5, maxOrderUsdt)));
-    }
+    if (!Number.isFinite(value) || value <= 0 || value > maxOrderUsdt) setAmount(String(Math.min(5, maxOrderUsdt)));
   }, [amount, maxOrderUsdt]);
 
   useEffect(() => {
@@ -135,6 +155,19 @@ export const TradeScreen: React.FC<Props> = ({
     return query ? pairs.filter((pair) => pair.includes(query)) : pairs;
   }, [pairSearch, pairs]);
 
+  const refreshAvailableUsdt = async (): Promise<number> => {
+    try {
+      const wallet = await fetchWalletBalance(credentials);
+      const coin = wallet?.coin?.find((item) => item.coin === 'USDT');
+      const free = Number(coin?.free || coin?.availableToWithdraw || coin?.walletBalance || 0);
+      const value = Number.isFinite(free) && free > 0 ? free : 0;
+      setAvailableUsdt(value);
+      return value;
+    } catch {
+      return availableUsdt;
+    }
+  };
+
   const selectPair = (next: string) => {
     if (smartRunning) return;
     setSymbol(next);
@@ -148,7 +181,6 @@ export const TradeScreen: React.FC<Props> = ({
       setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
       return;
     }
-
     Alert.alert(
       side === 'Buy' ? 'Potwierdź zakup' : 'Potwierdź sprzedaż',
       `${side.toUpperCase()} ${symbol} za ${value.toFixed(2)} USDT po cenie rynkowej?`,
@@ -175,11 +207,12 @@ export const TradeScreen: React.FC<Props> = ({
 
   const stopSmart = () => {
     stopRef.current = true;
-    setSmartStatus('STOP: kończę skan; jeśli jest otwarta pozycja, zamykam ją po rynku...');
+    setSmartStatus('STOP: kończę skanowanie. Otwarte pozycje LIVE pozostają bez zmian.');
   };
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
-    setSmartStatus(`SMART AUTO: skan ${scanCount + 1} • zbieram ${SCAN_SAMPLES} próbek rynku...`);
+    const scanNo = scanCountRef.current + 1;
+    setSmartStatus(`Skan ${scanNo}: zbieram ${SCAN_SAMPLES} próbek rynku...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
 
@@ -191,11 +224,12 @@ export const TradeScreen: React.FC<Props> = ({
         history.push(item);
         tracks.set(item.symbol, history);
       }
-      setScanInfo(`Skan ${scanCount + 1}: próbka ${sample + 1}/${SCAN_SAMPLES}`);
+      setScanInfo(`Skan ${scanNo}: próbka ${sample + 1}/${SCAN_SAMPLES}`);
       if (sample < SCAN_SAMPLES - 1) await sleep(SCAN_INTERVAL_MS);
     }
 
-    setScanCount((value) => value + 1);
+    scanCountRef.current = scanNo;
+    setScanCount(scanNo);
     const ranked: SmartCandidateScore[] = [];
     let bestObserved: { symbol: string; momentum: number; spread: number } | null = null;
 
@@ -205,205 +239,101 @@ export const TradeScreen: React.FC<Props> = ({
       const first = history[0];
       const shortBase = history[Math.max(0, history.length - 3)];
       if (first.lastPrice <= 0 || shortBase.lastPrice <= 0) continue;
-
       const windowMomentumPct = ((now.lastPrice - first.lastPrice) / first.lastPrice) * 100;
       const shortMomentumPct = ((now.lastPrice - shortBase.lastPrice) / shortBase.lastPrice) * 100;
 
       if (!bestObserved || windowMomentumPct > bestObserved.momentum) {
         bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
       }
-
-      if (windowMomentumPct < MIN_ENTRY_MOMENTUM_PCT) continue;
-      if (windowMomentumPct > MAX_ENTRY_MOMENTUM_PCT) continue;
-      if (shortMomentumPct < -0.01) continue;
-      if (now.spreadPct > MAX_SPREAD_PCT) continue;
-
+      if (windowMomentumPct < MIN_ENTRY_MOMENTUM_PCT || windowMomentumPct > MAX_ENTRY_MOMENTUM_PCT) continue;
+      if (shortMomentumPct < -0.01 || now.spreadPct > MAX_SPREAD_PCT) continue;
       const liquidityScore = Math.max(0, Math.log10(Math.max(now.turnover24h, 1)) - 5);
-      const score = windowMomentumPct * 260 + shortMomentumPct * 420 + Math.max(0, now.change24hPct) * 0.05 + liquidityScore * 0.55 - now.spreadPct * 55;
+      const score = windowMomentumPct * 260 + shortMomentumPct * 420 + liquidityScore * 0.55 - now.spreadPct * 55;
       ranked.push({ market: now, windowMomentumPct, shortMomentumPct, score });
     }
 
     ranked.sort((a, b) => b.score - a.score);
     const best = ranked[0] || null;
     setActiveScore(best);
-
     if (best) {
-      setScanInfo(
-        `WYBRANO ${best.market.symbol} • ruch ${best.windowMomentumPct >= 0 ? '+' : ''}${best.windowMomentumPct.toFixed(4)}% • ostatnie próbki ${best.shortMomentumPct >= 0 ? '+' : ''}${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`
-      );
+      setScanInfo(`WYBRANO ${best.market.symbol} • ruch +${best.windowMomentumPct.toFixed(4)}% • krótki ${best.shortMomentumPct >= 0 ? '+' : ''}${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
     } else if (bestObserved) {
-      const reason = bestObserved.momentum < MIN_ENTRY_MOMENTUM_PCT
-        ? `ruch < ${MIN_ENTRY_MOMENTUM_PCT.toFixed(3)}%`
-        : bestObserved.spread > MAX_SPREAD_PCT
-          ? `spread > ${MAX_SPREAD_PCT.toFixed(2)}%`
-          : 'ruch wygasa w ostatnich próbkach';
-      setScanInfo(`BRAK BUY • najlepszy ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • ${reason}`);
+      setScanInfo(`BRAK WEJŚCIA • najlepszy ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}%`);
     } else {
-      setScanInfo('BRAK BUY • za mało danych ze skanera');
+      setScanInfo('BRAK WEJŚCIA • za mało danych');
     }
-
     return best;
   };
 
-  const monitorAndSell = async (
-    position: SmartPosition,
-    realizedBefore: number,
-    sessionLossLimit: number
-  ): Promise<{ pnl: number; reason: string }> => {
-    let peakMovePct = Number.NEGATIVE_INFINITY;
-    let trailingArmed = false;
-    let reason = 'MANUAL STOP';
-
-    while (!stopRef.current) {
-      const snapshot = await fetchSpotMarketSnapshot(position.symbol);
-      setMarket(snapshot);
-      setSymbol(position.symbol);
-      const executablePrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
-      const currentValue = executablePrice * position.qty;
-      const pricePnlUsdt = currentValue - position.costUsdt;
-      const movePct = position.entryPrice > 0 ? ((executablePrice - position.entryPrice) / position.entryPrice) * 100 : 0;
-      peakMovePct = Math.max(peakMovePct, movePct);
-
-      if (movePct >= TRAIL_ARM_MOVE_PCT) trailingArmed = true;
-      const pullbackPct = trailingArmed ? peakMovePct - movePct : 0;
-
-      setSmartStatus(
-        `${position.symbol} • ruch ${movePct >= 0 ? '+' : ''}${movePct.toFixed(4)}% • max ${peakMovePct >= 0 ? '+' : ''}${peakMovePct.toFixed(4)}% • cofnięcie ${pullbackPct.toFixed(4)}% • PnL ceny ${pricePnlUsdt >= 0 ? '+' : ''}${pricePnlUsdt.toFixed(4)} USDT`
-      );
-
-      if (realizedBefore + pricePnlUsdt <= -sessionLossLimit) {
-        reason = 'MAX STRATA';
-        break;
-      }
-      if (trailingArmed && pullbackPct >= TRAIL_DROP_PCT && movePct > 0) {
-        reason = 'TRAILING CENY';
-        break;
-      }
-
-      await sleep(1400);
-    }
-
-    setSmartStatus(`${reason}: SELL ${position.symbol}...`);
-    const sellAck = await placeSpotMarketSellBase(credentials, position.symbol, position.qty);
-    const sell = await waitForSpotFill(credentials, sellAck.orderId);
-    const pnl = sell.quoteValue - position.costUsdt;
-    return { pnl, reason };
+  const updateTrackedPosition = async (position: TrackedPosition): Promise<TrackedPosition> => {
+    const snapshot = await fetchSpotMarketSnapshot(position.symbol);
+    const executablePrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
+    const movePct = position.entryPrice > 0 ? ((executablePrice - position.entryPrice) / position.entryPrice) * 100 : 0;
+    const peakMovePct = Math.max(position.peakMovePct, movePct);
+    const armed = peakMovePct >= TRAIL_ARM_MOVE_PCT;
+    const pullback = armed ? peakMovePct - movePct : 0;
+    const sellReady = armed && pullback >= TRAIL_DROP_PCT && movePct > 0;
+    return {
+      ...position,
+      peakMovePct,
+      currentMovePct: movePct,
+      currentPnlUsdt: executablePrice * position.qty - position.costUsdt,
+      sellReady,
+    };
   };
 
-  const startSmart = () => {
+  const confirmAssistBuy = () => {
+    const candidate = assistCandidateRef.current;
     const trade = toNumber(amount);
-    const target = toNumber(targetProfit);
-    const loss = toNumber(maxLoss);
-    const cycles = Math.floor(toNumber(maxCycles));
-
-    if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota Smart Auto musi być > 0 i <= ${maxOrderUsdt} USDT.`);
-    if (![target, loss].every((value) => Number.isFinite(value) && value > 0)) return setError('Cel zysku i max strata muszą być większe od 0.');
-    if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Maksymalna liczba cykli: 1–1000.');
-
-    const holdingText = initialHolding
-      ? ` Najpierw Smart Auto będzie obserwował posiadane ${initialHolding.symbol.replace(/USDT$/, '')} (${initialHolding.baseQty}).`
-      : '';
+    const slots = Math.max(1, Math.min(5, Math.floor(toNumber(maxSlots)) || 1));
+    if (!candidate || !smartRunning || smartMode !== 'assist') return;
+    if (livePositionsRef.current.length >= slots) return setError('Wszystkie sloty LIVE są zajęte.');
 
     Alert.alert(
-      'SMART AUTO LIVE — prawdziwe pieniądze',
-      `Smart Auto skanuje ruch ceny w kilku kolejnych próbkach zamiast pojedynczego odczytu. BUY wymaga rosnącego momentum. Po BUY trailing ceny uzbraja się od +${TRAIL_ARM_MOVE_PCT.toFixed(2)}% i sprzedaje po cofnięciu o ${TRAIL_DROP_PCT.toFixed(2)} pkt proc. Max strata sesji: ${loss.toFixed(2)} USDT.${holdingText} Zysk nie jest gwarantowany.`,
+      'Potwierdź BUY',
+      `${candidate.market.symbol} za ${trade.toFixed(2)} USDT?`,
       [
         { text: 'Anuluj', style: 'cancel' },
         {
-          text: 'START SMART AUTO',
+          text: 'KUP',
           onPress: async () => {
-            stopRef.current = false;
-            setSmartRunning(true);
+            setBusy(true);
             setError('');
-            setSessionProfit(0);
-            setCycleCount(0);
-            setScanCount(0);
-            setScanInfo('Start skanera...');
-            setActiveScore(null);
-
-            let total = 0;
-            let completedCycles = 0;
-            let openPosition: SmartPosition | null = null;
-            let portfolioHoldingPending = initialHolding;
-
             try {
-              while (!stopRef.current && completedCycles < cycles && total < target && total > -loss) {
-                if (portfolioHoldingPending) {
-                  setSymbol(portfolioHoldingPending.symbol);
-                  openPosition = {
-                    symbol: portfolioHoldingPending.symbol,
-                    qty: portfolioHoldingPending.baseQty,
-                    costUsdt: portfolioHoldingPending.buyCostUsdt,
-                    entryPrice: portfolioHoldingPending.buyPrice,
-                    fromPortfolio: true,
-                  };
-                  setSmartStatus(`Pozycja startowa ${portfolioHoldingPending.symbol}: obserwuję ruch ceny od ceny zakupu...`);
-                  portfolioHoldingPending = null;
-                } else {
-                  let candidate: SmartCandidateScore | null = null;
-                  while (!candidate && !stopRef.current) {
-                    candidate = await scanBestCandidate();
-                    if (!candidate && !stopRef.current) {
-                      setSmartStatus('Nie ma jeszcze ruchu wejściowego. Czekam 2 s i skanuję ponownie.');
-                      await sleep(2000);
-                    }
-                  }
-                  if (!candidate || stopRef.current) break;
-
-                  setSymbol(candidate.market.symbol);
-                  setMarket(candidate.market);
-                  setSmartStatus(`${candidate.market.symbol}: ruch +${candidate.windowMomentumPct.toFixed(4)}% • BUY ${trade.toFixed(2)} USDT`);
-                  const buyAck = await placeSpotMarketOrder(credentials, candidate.market.symbol, 'Buy', trade, maxOrderUsdt);
-                  setLastAck(buyAck);
-                  const buy = await waitForSpotFill(credentials, buyAck.orderId);
-                  const baseCoin = candidate.market.symbol.replace(/USDT$/, '');
-                  const qty = Math.max(0, buy.baseQty - (buy.feeByCurrency[baseCoin] || 0));
-                  const costUsdt = buy.quoteValue;
-                  if (qty <= 0 || costUsdt <= 0 || buy.avgPrice <= 0) throw new Error('Brak prawidłowej ilości lub ceny po BUY.');
-
-                  openPosition = {
-                    symbol: candidate.market.symbol,
-                    qty,
-                    costUsdt,
-                    entryPrice: buy.avgPrice,
-                    fromPortfolio: false,
-                  };
-                }
-
-                if (!openPosition) continue;
-                const result = await monitorAndSell(openPosition, total, loss);
-                total += result.pnl;
-                completedCycles += 1;
-                setCycleCount(completedCycles);
-                setSessionProfit(total);
-                setSmartStatus(`${result.reason} • zamknięty cykl ${completedCycles} • wynik cyklu ${result.pnl >= 0 ? '+' : ''}${result.pnl.toFixed(4)} USDT • sesja ${total >= 0 ? '+' : ''}${total.toFixed(4)} USDT`);
-                if (openPosition.fromPortfolio) onHoldingConsumed?.();
-                openPosition = null;
-
-                if (total >= target || total <= -loss || stopRef.current) break;
-                await sleep(1200);
+              const free = await refreshAvailableUsdt();
+              if (free + 1e-8 < trade) {
+                setSmartStatus(`Za mało wolnych USDT (${free.toFixed(2)}). Skaner działa dalej.`);
+                setError('Insufficient balance — skaner nie został zatrzymany.');
+                return;
               }
-
-              if (total >= target) setSmartStatus(`CEL SESJI OSIĄGNIĘTY: +${total.toFixed(4)} USDT`);
-              else if (total <= -loss) setSmartStatus(`MAX STRATA SESJI: ${total.toFixed(4)} USDT — SMART AUTO STOP`);
-              else if (stopRef.current) setSmartStatus(`SMART AUTO zatrzymane • wynik ${total >= 0 ? '+' : ''}${total.toFixed(4)} USDT`);
-              else setSmartStatus(`Koniec limitu ${completedCycles} cykli • wynik ${total >= 0 ? '+' : ''}${total.toFixed(4)} USDT`);
+              const ack = await placeSpotMarketOrder(credentials, candidate.market.symbol, 'Buy', trade, maxOrderUsdt);
+              setLastAck(ack);
+              const fill = await waitForSpotFill(credentials, ack.orderId);
+              const baseCoin = candidate.market.symbol.replace(/USDT$/, '');
+              const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
+              const position: TrackedPosition = {
+                id: ack.orderId,
+                symbol: candidate.market.symbol,
+                qty,
+                costUsdt: fill.quoteValue,
+                entryPrice: fill.avgPrice,
+                peakMovePct: 0,
+                currentMovePct: 0,
+                currentPnlUsdt: 0,
+                sellReady: false,
+              };
+              livePositionsRef.current = [...livePositionsRef.current, position];
+              setLivePositions([...livePositionsRef.current]);
+              assistCandidateRef.current = null;
+              setAssistCandidate(null);
+              setSmartStatus(`BUY wykonany: ${position.symbol}. Monitoruję pozycję i równolegle szukam kolejnej.`);
+              await refreshAvailableUsdt();
             } catch (e: unknown) {
-              const message = e instanceof Error ? e.message : 'Błąd Smart Auto.';
-              if (openPosition && openPosition.qty > 0) {
-                try {
-                  setSmartStatus(`Błąd: ${message}. Awaryjnie zamykam ${openPosition.symbol}...`);
-                  const emergency = await placeSpotMarketSellBase(credentials, openPosition.symbol, openPosition.qty);
-                  await waitForSpotFill(credentials, emergency.orderId);
-                  openPosition = null;
-                } catch {
-                  setSmartStatus(`KRYTYCZNE: ${message}. Nie udało się potwierdzić awaryjnego SELL — sprawdź pozycję na Bybit.`);
-                }
-              }
+              const message = e instanceof Error ? e.message : 'Błąd BUY.';
               setError(message);
+              setSmartStatus(`BUY nieudany: ${message}. Skaner działa dalej.`);
             } finally {
-              setSmartRunning(false);
-              stopRef.current = false;
+              setBusy(false);
             }
           },
         },
@@ -411,11 +341,204 @@ export const TradeScreen: React.FC<Props> = ({
     );
   };
 
+  const confirmAssistSell = (position: TrackedPosition) => {
+    Alert.alert(
+      'Potwierdź SELL',
+      `${position.symbol} • ruch ${position.currentMovePct >= 0 ? '+' : ''}${position.currentMovePct.toFixed(4)}%?`,
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'SPRZEDAJ',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(true);
+            setError('');
+            try {
+              const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty);
+              const fill = await waitForSpotFill(credentials, ack.orderId);
+              const pnl = fill.quoteValue - position.costUsdt;
+              livePositionsRef.current = livePositionsRef.current.filter((item) => item.id !== position.id);
+              setLivePositions([...livePositionsRef.current]);
+              cycleCountRef.current += 1;
+              sessionProfitRef.current += pnl;
+              setCycleCount(cycleCountRef.current);
+              setSessionProfit(sessionProfitRef.current);
+              if (position.fromPortfolio) onHoldingConsumed?.();
+              setSmartStatus(`SELL ${position.symbol} • wynik ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} USDT. Skaner działa dalej.`);
+              await refreshAvailableUsdt();
+            } catch (e: unknown) {
+              const message = e instanceof Error ? e.message : 'Błąd SELL.';
+              setError(message);
+              setSmartStatus(`SELL nieudany: ${message}. Skaner nadal monitoruje pozycje.`);
+            } finally {
+              setBusy(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const startSmart = () => {
+    const trade = toNumber(amount);
+    const target = toNumber(targetProfit);
+    const loss = toNumber(maxLoss);
+    const cycles = Math.floor(toNumber(maxCycles));
+    const slots = Math.max(1, Math.min(5, Math.floor(toNumber(maxSlots)) || 1));
+    const virtualCapital = toNumber(shadowCapital);
+
+    if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
+    if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
+    if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
+    if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Maksymalna liczba cykli: 1–1000.');
+    if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < trade)) return setError('Kapitał SHADOW musi wystarczyć co najmniej na jedną transakcję.');
+
+    stopRef.current = false;
+    scanCountRef.current = 0;
+    cycleCountRef.current = 0;
+    sessionProfitRef.current = 0;
+    shadowPositionsRef.current = [];
+    assistCandidateRef.current = null;
+    setSmartRunning(true);
+    setError('');
+    setCycleCount(0);
+    setScanCount(0);
+    setSessionProfit(0);
+    setActiveScore(null);
+    setAssistCandidate(null);
+    setScanInfo('Start ciągłego skanera...');
+
+    if (smartMode === 'shadow') {
+      shadowUsdtRef.current = virtualCapital;
+      setShadowUsdt(virtualCapital);
+      setShadowPositions([]);
+    } else {
+      void refreshAvailableUsdt();
+      if (initialHolding && livePositionsRef.current.every((item) => item.symbol !== initialHolding.symbol)) {
+        const seed: TrackedPosition = {
+          id: `portfolio-${initialHolding.symbol}-${Date.now()}`,
+          symbol: initialHolding.symbol,
+          qty: initialHolding.baseQty,
+          costUsdt: initialHolding.buyCostUsdt,
+          entryPrice: initialHolding.buyPrice,
+          peakMovePct: 0,
+          currentMovePct: 0,
+          currentPnlUsdt: 0,
+          sellReady: false,
+          fromPortfolio: true,
+        };
+        livePositionsRef.current = [...livePositionsRef.current, seed];
+        setLivePositions([...livePositionsRef.current]);
+      }
+    }
+
+    void (async () => {
+      while (!stopRef.current) {
+        try {
+          if (smartMode === 'shadow') {
+            const refreshed: TrackedPosition[] = [];
+            for (const position of shadowPositionsRef.current) {
+              const updated = await updateTrackedPosition(position);
+              if (updated.sellReady) {
+                const snapshot = await fetchSpotMarketSnapshot(updated.symbol);
+                const exitPrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
+                const proceeds = exitPrice * updated.qty;
+                const pnl = proceeds - updated.costUsdt;
+                shadowUsdtRef.current += proceeds;
+                sessionProfitRef.current += pnl;
+                cycleCountRef.current += 1;
+                setSmartStatus(`SHADOW SELL ${updated.symbol} • ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} USDT • szukam dalej.`);
+              } else {
+                refreshed.push(updated);
+              }
+            }
+            shadowPositionsRef.current = refreshed;
+            setShadowPositions([...refreshed]);
+            setShadowUsdt(shadowUsdtRef.current);
+            setCycleCount(cycleCountRef.current);
+            setSessionProfit(sessionProfitRef.current);
+
+            if (cycleCountRef.current >= cycles) break;
+            if (target > 0 && sessionProfitRef.current >= target) break;
+            if (sessionProfitRef.current <= -loss) break;
+
+            if (refreshed.length < slots && shadowUsdtRef.current >= trade) {
+              const candidate = await scanBestCandidate();
+              if (candidate && refreshed.every((item) => item.symbol !== candidate.market.symbol)) {
+                const entry = candidate.market.ask > 0 ? candidate.market.ask : candidate.market.lastPrice;
+                const qty = trade / entry;
+                const position: TrackedPosition = {
+                  id: `shadow-${Date.now()}-${candidate.market.symbol}`,
+                  symbol: candidate.market.symbol,
+                  qty,
+                  costUsdt: trade,
+                  entryPrice: entry,
+                  peakMovePct: 0,
+                  currentMovePct: 0,
+                  currentPnlUsdt: 0,
+                  sellReady: false,
+                };
+                shadowUsdtRef.current -= trade;
+                shadowPositionsRef.current = [...shadowPositionsRef.current, position];
+                setShadowPositions([...shadowPositionsRef.current]);
+                setShadowUsdt(shadowUsdtRef.current);
+                setSmartStatus(`SHADOW BUY ${position.symbol} ${trade.toFixed(2)} USDT • sloty ${shadowPositionsRef.current.length}/${slots}.`);
+              }
+            } else {
+              setSmartStatus(`SHADOW: monitoruję ${refreshed.length}/${slots} pozycji równolegle.`);
+              await sleep(1400);
+            }
+          } else {
+            const refreshed: TrackedPosition[] = [];
+            for (const position of livePositionsRef.current) {
+              try {
+                refreshed.push(await updateTrackedPosition(position));
+              } catch {
+                refreshed.push(position);
+              }
+            }
+            livePositionsRef.current = refreshed;
+            setLivePositions([...refreshed]);
+
+            const free = await refreshAvailableUsdt();
+            if (refreshed.length < slots && free + 1e-8 >= trade) {
+              const candidate = await scanBestCandidate();
+              if (candidate && refreshed.every((item) => item.symbol !== candidate.market.symbol)) {
+                assistCandidateRef.current = candidate;
+                setAssistCandidate(candidate);
+                setSmartStatus(`BUY GOTOWY: ${candidate.market.symbol} • ${trade.toFixed(2)} USDT. Potwierdź, a skaner w tym czasie nadal działa.`);
+              }
+            } else if (refreshed.length >= slots) {
+              setSmartStatus(`LIVE ASSIST: ${refreshed.length}/${slots} slotów zajętych. Monitoruję wszystkie równolegle.`);
+            } else {
+              setSmartStatus(`LIVE ASSIST: wolne USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Nie zatrzymuję skanera; monitoruję pozycje.`);
+              await sleep(1800);
+            }
+          }
+        } catch (e: unknown) {
+          const message = e instanceof Error ? e.message : 'Błąd skanera.';
+          setError(message);
+          setSmartStatus(`Błąd chwilowy: ${message}. Ponawiam za 3 s — Smart nie został zatrzymany.`);
+          await sleep(3000);
+        }
+      }
+
+      setSmartRunning(false);
+      stopRef.current = false;
+      if (cycleCountRef.current >= cycles) setSmartStatus(`Koniec limitu ${cycles} cykli.`);
+      else if (target > 0 && sessionProfitRef.current >= target) setSmartStatus(`Cel sesji osiągnięty: +${sessionProfitRef.current.toFixed(4)} USDT.`);
+      else if (sessionProfitRef.current <= -loss) setSmartStatus(`Max strata sesji: ${sessionProfitRef.current.toFixed(4)} USDT.`);
+      else setSmartStatus('Skaner zatrzymany ręcznie.');
+    })();
+  };
+
+  const positionsToRender = smartMode === 'shadow' ? shadowPositions : livePositions;
+
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>Trading Spot</Text>
-        <Text style={styles.subtitle}>LIVE Bybit • Market • limit {maxOrderUsdt.toFixed(2)} USDT / zlecenie</Text>
+        <Text style={styles.subtitle}>Bybit Spot • ręczny handel + Smart ciągły</Text>
 
         <View style={styles.quoteCard}>
           <View style={styles.quoteTop}>
@@ -425,119 +548,98 @@ export const TradeScreen: React.FC<Props> = ({
             </Text>
           </View>
           <Text style={styles.quotePrice}>{market ? `${priceText(market.lastPrice)} USDT` : 'Pobieranie ceny...'}</Text>
-          {market && <Text style={styles.quoteDetails}>Bid {priceText(market.bid)} • Ask {priceText(market.ask)} • 24h H/L {priceText(market.high24h)} / {priceText(market.low24h)}</Text>}
+          {market && <Text style={styles.quoteDetails}>Bid {priceText(market.bid)} • Ask {priceText(market.ask)}</Text>}
         </View>
 
         <Text style={styles.label}>Para ręcznego handlu</Text>
         <TouchableOpacity style={styles.pairSelector} onPress={() => !smartRunning && setPairPickerOpen(true)}>
-          <View>
-            <Text style={styles.pairValue}>{symbol}</Text>
-            <Text style={styles.hint}>{smartRunning ? 'Smart Auto wybiera parę automatycznie' : 'Dotknij, aby zmienić'}</Text>
-          </View>
+          <View><Text style={styles.pairValue}>{symbol}</Text><Text style={styles.hint}>Dotknij, aby zmienić</Text></View>
           <Text style={styles.arrow}>⌄</Text>
         </TouchableOpacity>
 
         <Text style={styles.label}>Kwota pojedynczej transakcji (USDT)</Text>
-        <TextInput value={amount} onChangeText={setAmount} editable={!smartRunning} keyboardType="decimal-pad" style={styles.input} />
+        <TextInput value={amount} onChangeText={setAmount} editable={!busy} keyboardType="decimal-pad" style={styles.input} />
         {!!error && <Text style={styles.error}>{error}</Text>}
-
         <View style={styles.row}>
-          <TouchableOpacity disabled={busy || smartRunning} style={[styles.button, styles.buy]} onPress={() => submit('Buy')}>
-            <Text style={styles.buttonText}>{busy ? '...' : 'BUY'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity disabled={busy || smartRunning} style={[styles.button, styles.sell]} onPress={() => submit('Sell')}>
-            <Text style={styles.buttonText}>{busy ? '...' : 'SELL'}</Text>
-          </TouchableOpacity>
+          <TouchableOpacity disabled={busy} style={[styles.button, styles.buy]} onPress={() => submit('Buy')}><Text style={styles.buttonText}>BUY</Text></TouchableOpacity>
+          <TouchableOpacity disabled={busy} style={[styles.button, styles.sell]} onPress={() => submit('Sell')}><Text style={styles.buttonText}>SELL</Text></TouchableOpacity>
         </View>
 
         <View style={styles.smartCard}>
           <View style={styles.smartHeader}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.smartTitle}>SMART AUTO</Text>
-              <Text style={styles.smartSub}>Skan ruchu ceny → BUY → trailing ceny → SELL → USDT → kolejny skan</Text>
+              <Text style={styles.smartTitle}>SMART CONTINUOUS</Text>
+              <Text style={styles.smartSub}>wiele slotów • jedna pozycja nie blokuje kolejnych skanów</Text>
             </View>
             <Switch value={smartEnabled} onValueChange={(value) => { if (!smartRunning) setSmartEnabled(value); }} disabled={smartRunning} />
           </View>
 
           {smartEnabled && <>
-            <Text style={styles.smartNotice}>
-              Skaner analizuje kilka kolejnych próbek rynku. Wejście nie zależy od prowizji. Trailing ceny uzbraja się przy +{TRAIL_ARM_MOVE_PCT.toFixed(2)}% od ceny zakupu i reaguje po cofnięciu o {TRAIL_DROP_PCT.toFixed(2)} pkt proc. Max strata sesji pozostaje aktywna.
-            </Text>
+            <Text style={styles.smartNotice}>SHADOW działa automatycznie i może równolegle symulować kilka pozycji. LIVE ASSIST skanuje i monitoruje cały czas, ale realny BUY/SELL wymaga Twojego potwierdzenia. Pojedynczy błąd lub brak salda nie wyłącza skanera.</Text>
 
-            {initialHolding && (
-              <View style={styles.holdingBox}>
-                <Text style={styles.holdingTitle}>Pozycja startowa z Portfolio</Text>
-                <Text style={styles.holdingText}>{initialHolding.symbol} • {initialHolding.baseQty} • zakup @ {priceText(initialHolding.buyPrice)}</Text>
-              </View>
-            )}
-
-            <View style={styles.grid}>
-              <View style={styles.field}>
-                <Text style={styles.smallLabel}>Cel zysku sesji (USDT)</Text>
-                <TextInput value={targetProfit} onChangeText={setTargetProfit} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-              </View>
-              <View style={styles.field}>
-                <Text style={styles.smallLabel}>Max strata sesji (USDT)</Text>
-                <TextInput value={maxLoss} onChangeText={setMaxLoss} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-              </View>
+            <View style={styles.modeRow}>
+              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>SHADOW AUTO</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>LIVE + POTWIERDZENIE</Text></TouchableOpacity>
             </View>
 
-            <Text style={styles.smallLabel}>Maksymalna liczba zamkniętych cykli (1–1000)</Text>
-            <TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} />
+            <View style={styles.grid}>
+              <View style={styles.field}><Text style={styles.smallLabel}>Cel zysku (0 = bez limitu)</Text><TextInput value={targetProfit} onChangeText={setTargetProfit} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></View>
+              <View style={styles.field}><Text style={styles.smallLabel}>Max strata sesji</Text><TextInput value={maxLoss} onChangeText={setMaxLoss} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></View>
+            </View>
+            <View style={styles.grid}>
+              <View style={styles.field}><Text style={styles.smallLabel}>Maks. cykli</Text><TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
+              <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty 1–5</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
+            </View>
+            {smartMode === 'shadow' ? (
+              <><Text style={styles.smallLabel}>Kapitał SHADOW (USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
+            ) : (
+              <Text style={styles.balanceText}>Wolne USDT: {availableUsdt.toFixed(2)}</Text>
+            )}
 
             <View style={styles.stats}>
-              <Text style={styles.stat}>Zamknięte cykle: {cycleCount}</Text>
+              <Text style={styles.stat}>Cykle: {cycleCount}</Text>
               <Text style={styles.stat}>Skany: {scanCount}</Text>
               <Text style={[styles.stat, { color: sessionProfit >= 0 ? '#22C55E' : '#EF4444' }]}>PnL {sessionProfit >= 0 ? '+' : ''}{sessionProfit.toFixed(4)}</Text>
+              {smartMode === 'shadow' && <Text style={styles.stat}>USDT {shadowUsdt.toFixed(2)}</Text>}
             </View>
 
             {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
-            {activeScore && (
-              <Text style={styles.candidate}>
-                Kandydat: {activeScore.market.symbol} • ruch +{activeScore.windowMomentumPct.toFixed(4)}% • krótki +{activeScore.shortMomentumPct.toFixed(4)}%
-              </Text>
-            )}
+            {activeScore && <Text style={styles.candidate}>Kandydat: {activeScore.market.symbol} • +{activeScore.windowMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
+            {smartMode === 'assist' && assistCandidate && smartRunning && (
+              <TouchableOpacity disabled={busy} style={styles.confirmBuy} onPress={confirmAssistBuy}><Text style={styles.buttonText}>POTWIERDŹ BUY {assistCandidate.market.symbol}</Text></TouchableOpacity>
+            )}
+
+            {positionsToRender.map((position) => (
+              <View key={position.id} style={styles.positionCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.positionSymbol}>{position.symbol}</Text>
+                  <Text style={styles.positionLine}>wejście {priceText(position.entryPrice)} • ruch {position.currentMovePct >= 0 ? '+' : ''}{position.currentMovePct.toFixed(4)}%</Text>
+                  <Text style={styles.positionLine}>max +{Math.max(0, position.peakMovePct).toFixed(4)}% • PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
+                </View>
+                {smartMode === 'assist' && position.sellReady && <TouchableOpacity disabled={busy} style={styles.sellReady} onPress={() => confirmAssistSell(position)}><Text style={styles.buttonText}>SELL</Text></TouchableOpacity>}
+              </View>
+            ))}
+
             {smartRunning ? (
-              <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP SMART AUTO</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP SKANERA</Text></TouchableOpacity>
             ) : (
-              <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>START SMART AUTO LIVE</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>START SMART CONTINUOUS</Text></TouchableOpacity>
             )}
           </>}
         </View>
 
-        {lastAck && (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Ostatnie zlecenie</Text>
-            <Text style={styles.line}>{lastAck.side} {lastAck.symbol} • {lastAck.quoteAmountUsdt.toFixed(2)} USDT</Text>
-            <Text style={styles.line}>Order ID: {lastAck.orderId}</Text>
-            <Text style={styles.line}>API: {lastAck.requestLatencyMs} ms</Text>
-          </View>
-        )}
+        {lastAck && <View style={styles.card}><Text style={styles.cardTitle}>Ostatnie zlecenie</Text><Text style={styles.line}>{lastAck.side} {lastAck.symbol} • {lastAck.quoteAmountUsdt.toFixed(2)} USDT</Text><Text style={styles.line}>Order ID: {lastAck.orderId}</Text></View>}
       </ScrollView>
 
       <Modal visible={pairPickerOpen} animationType="slide" transparent onRequestClose={() => setPairPickerOpen(false)}>
-        <View style={styles.backdrop}>
-          <View style={styles.modal}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Wybierz parę Spot/USDT</Text>
-              <TouchableOpacity onPress={() => setPairPickerOpen(false)}><Text style={styles.close}>✕</Text></TouchableOpacity>
-            </View>
-            <TextInput value={pairSearch} onChangeText={setPairSearch} placeholder="BTC, XRP, ETH..." placeholderTextColor="#666" style={styles.search} />
-            {pairsLoading && <ActivityIndicator color="#F0B90B" />}
-            <FlatList
-              data={filteredPairs}
-              keyExtractor={(item) => item}
-              renderItem={({ item }) => (
-                <TouchableOpacity style={styles.pairRow} onPress={() => selectPair(item)}>
-                  <Text style={styles.pairRowText}>{item}</Text>
-                  {item === symbol && <Text style={styles.check}>✓</Text>}
-                </TouchableOpacity>
-              )}
-            />
-          </View>
-        </View>
+        <View style={styles.backdrop}><View style={styles.modal}>
+          <View style={styles.modalHeader}><Text style={styles.modalTitle}>Wybierz parę Spot/USDT</Text><TouchableOpacity onPress={() => setPairPickerOpen(false)}><Text style={styles.close}>✕</Text></TouchableOpacity></View>
+          <TextInput value={pairSearch} onChangeText={setPairSearch} placeholder="BTC, XRP, ETH..." placeholderTextColor="#666" style={styles.search} />
+          {pairsLoading && <ActivityIndicator color="#F0B90B" />}
+          <FlatList data={filteredPairs} keyExtractor={(item) => item} renderItem={({ item }) => <TouchableOpacity style={styles.pairRow} onPress={() => selectPair(item)}><Text style={styles.pairRowText}>{item}</Text>{item === symbol && <Text style={styles.check}>✓</Text>}</TouchableOpacity>} />
+        </View></View>
       </Modal>
     </SafeAreaView>
   );
@@ -565,19 +667,21 @@ const styles = StyleSheet.create({
   button: { flex: 1, minHeight: 52, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   buy: { backgroundColor: '#15803D' },
   sell: { backgroundColor: '#B91C1C' },
-  buttonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800' },
+  buttonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
   smartCard: { backgroundColor: '#191919', borderWidth: 1, borderColor: '#F0B90B', borderRadius: 14, padding: 15, marginTop: 22 },
   smartHeader: { flexDirection: 'row', alignItems: 'center' },
   smartTitle: { color: '#F0B90B', fontSize: 18, fontWeight: '900' },
   smartSub: { color: '#8E8E93', fontSize: 10, marginTop: 3, paddingRight: 8 },
   smartNotice: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
-  holdingBox: { backgroundColor: '#222222', borderRadius: 8, padding: 10, marginBottom: 8 },
-  holdingTitle: { color: '#F0B90B', fontSize: 11, fontWeight: '800' },
-  holdingText: { color: '#D4D4D8', fontSize: 11, marginTop: 4 },
+  modeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
+  modeButton: { flex: 1, backgroundColor: '#242424', borderWidth: 1, borderColor: '#3F3F46', padding: 10, borderRadius: 9, alignItems: 'center' },
+  modeSelected: { borderColor: '#F0B90B', backgroundColor: '#302A12' },
+  modeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
   grid: { flexDirection: 'row', gap: 10 },
   field: { flex: 1 },
   smallLabel: { color: '#A1A1AA', fontSize: 11, marginTop: 8, marginBottom: 4 },
   smallInput: { backgroundColor: '#242424', color: '#FFFFFF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 9, borderWidth: 1, borderColor: '#333333' },
+  balanceText: { color: '#22C55E', fontSize: 12, fontWeight: '800', marginTop: 10 },
   stats: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 14 },
   stat: { color: '#FFFFFF', fontWeight: '700', fontSize: 11 },
   scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
@@ -585,7 +689,12 @@ const styles = StyleSheet.create({
   status: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   smartButton: { backgroundColor: '#F0B90B', padding: 14, borderRadius: 10, alignItems: 'center' },
   smartButtonText: { color: '#111111', fontWeight: '900' },
-  stopButton: { backgroundColor: '#B91C1C', padding: 14, borderRadius: 10, alignItems: 'center' },
+  stopButton: { backgroundColor: '#B91C1C', padding: 14, borderRadius: 10, alignItems: 'center', marginTop: 10 },
+  confirmBuy: { backgroundColor: '#15803D', padding: 13, borderRadius: 10, alignItems: 'center', marginBottom: 10 },
+  positionCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#222222', borderRadius: 10, padding: 10, marginBottom: 8 },
+  positionSymbol: { color: '#FFFFFF', fontWeight: '900', fontSize: 13 },
+  positionLine: { color: '#A1A1AA', fontSize: 10, marginTop: 3 },
+  sellReady: { backgroundColor: '#B91C1C', paddingHorizontal: 16, paddingVertical: 11, borderRadius: 8, marginLeft: 8 },
   card: { backgroundColor: '#1E1E1E', borderRadius: 14, padding: 15, marginTop: 18 },
   cardTitle: { color: '#FFFFFF', fontWeight: '800', marginBottom: 8 },
   line: { color: '#D4D4D8', marginTop: 4 },
