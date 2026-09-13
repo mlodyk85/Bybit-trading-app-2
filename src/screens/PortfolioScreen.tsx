@@ -26,6 +26,7 @@ interface PortfolioScreenProps {
   autoRefreshEnabled: boolean;
   onRefresh: () => void;
   onToggleAutoRefresh: (enabled: boolean) => void;
+  onOpenTrade: (symbol: string) => void;
 }
 
 export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
@@ -38,6 +39,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
   autoRefreshEnabled,
   onRefresh,
   onToggleAutoRefresh,
+  onOpenTrade,
 }) => {
   const nonZeroAssets = filterNonZeroAssets(account?.coin);
   const [executions, setExecutions] = useState<SpotExecution[]>([]);
@@ -68,7 +70,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
       <FlatList
         data={nonZeroAssets}
         keyExtractor={(item) => item.coin}
-        renderItem={({ item }) => <AssetRow asset={item} executions={executions} />}
+        renderItem={({ item }) => <AssetRow asset={item} executions={executions} onOpenTrade={onOpenTrade} />}
         contentContainerStyle={styles.scrollContent}
         refreshControl={
           <RefreshControl
@@ -118,7 +120,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
             <View style={styles.infoBox}>
               <Text style={styles.infoTitle}>Historia ceny wejścia/wyjścia</Text>
               <Text style={styles.infoText}>
-                Dla każdej kryptowaluty pokazujemy ostatnią kwotę BUY, ostatnią kwotę SELL oraz obecną wartość aktywa.
+                Dotknij aktywa, aby otworzyć od razu jego parę USDT. Pokazujemy ostatni BUY, SELL i obecną wartość.
               </Text>
             </View>
 
