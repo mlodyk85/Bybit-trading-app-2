@@ -1,4 +1,5 @@
 import { buildQueryString, signBybitPostBody, signBybitRequest } from './signing';
+import { filterSymbolsByScope, loadMarketScopeConfig } from '../services/marketScope';
 import {
   ApiCredentials,
   BybitApiResponse,
@@ -251,8 +252,12 @@ export async function fetchSpotMarketSnapshot(symbolInput: string): Promise<Spot
 export async function fetchSpotUsdtMarketCandidates(limit = 40): Promise<SpotMarketCandidate[]> {
   const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'spot' });
   const stablePrefixes = ['USDC', 'USDE', 'DAI', 'FDUSD', 'TUSD', 'USDP', 'PYUSD'];
-  return (result?.list || [])
-    .filter((ticker) => ticker.symbol.endsWith('USDT') && !stablePrefixes.some((coin) => ticker.symbol.startsWith(coin)))
+  const marketConfig = await loadMarketScopeConfig();
+  const scopedTickers = filterSymbolsByScope(
+    (result?.list || []).filter((ticker) => ticker.symbol.endsWith('USDT') && !stablePrefixes.some((coin) => ticker.symbol.startsWith(coin))),
+    marketConfig
+  );
+  return scopedTickers
     .map((ticker) => {
       const snapshot = tickerToSnapshot(ticker);
       if (!snapshot || snapshot.bid <= 0 || snapshot.ask <= 0) return null;
