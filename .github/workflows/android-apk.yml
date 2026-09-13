@@ -10,8 +10,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      NODE_ENV: production
 
     steps:
       - name: Checkout repository
@@ -30,7 +28,7 @@ jobs:
           java-version: '17'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --include=dev
 
       - name: Lint check
         run: npm run lint
@@ -42,9 +40,14 @@ jobs:
         run: npm test
 
       - name: Generate Android Native Project (Expo Prebuild)
+        env:
+          NODE_ENV: production
         run: npx expo prebuild --platform android --no-install --clean
 
       - name: Build standalone Release APK with bundled JS
+        env:
+          NODE_ENV: production
+          GRADLE_OPTS: '-Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"'
         run: |
           cd android
           chmod +x gradlew
