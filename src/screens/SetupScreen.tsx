@@ -61,23 +61,20 @@ export const SetupScreen: React.FC<SetupScreenProps> = ({
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
-      {/* Header / Logo */}
       <View style={styles.headerContainer}>
         <Text style={styles.title}>Bybit Portfolio</Text>
         <Text style={styles.subtitle}>Konfiguracja połączenia API V5</Text>
       </View>
 
-      {/* Warning Box */}
       <View style={styles.warningBox}>
         <Text style={styles.warningTitle}>BEZPIECZEŃSTWO KLUCZY API</Text>
         <Text style={styles.warningText}>
-          Używaj wyłącznie klucza API Read-Only.{'\n'}
-          Nie włączaj Withdrawal (Wypłat).{'\n'}
-          Nie udostępniaj klucza API innym osobom.
+          Do handlu włącz wyłącznie uprawnienie Spot Trade.{'\n'}
+          Withdrawal/Wypłaty pozostaw wyłączone.{'\n'}
+          Nie udostępniaj klucza API ani secretu innym osobom.
         </Text>
       </View>
 
-      {/* Form Fields */}
       <View style={styles.formGroup}>
         <Text style={styles.label}>API Key</Text>
         <TextInput
@@ -113,7 +110,6 @@ export const SetupScreen: React.FC<SetupScreenProps> = ({
         </View>
       </View>
 
-      {/* Switch */}
       <View style={styles.switchRow}>
         <Text style={styles.switchLabel}>Pamiętaj dane na tym urządzeniu</Text>
         <Switch
@@ -124,7 +120,6 @@ export const SetupScreen: React.FC<SetupScreenProps> = ({
         />
       </View>
 
-      {/* Action Buttons */}
       <TouchableOpacity
         style={[styles.primaryButton, isSubmitting && styles.disabledButton]}
         onPress={handleConnect}
