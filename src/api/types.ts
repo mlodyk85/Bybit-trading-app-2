@@ -11,7 +11,7 @@ export interface CoinBalance {
   equity: string;
   usdValue: string;
   walletBalance: string;
-  free: string; // Available balance for coin
+  free: string;
   locked: string;
   borrowAmount: string;
   availableToBorrow: string;
@@ -44,9 +44,9 @@ export interface WalletBalanceResult {
 
 export interface Position {
   symbol: string;
-  side: 'Buy' | 'Sell' | 'None' | string; // Buy = LONG, Sell = SHORT
+  side: 'Buy' | 'Sell' | 'None' | string;
   size: string;
-  avgPrice: string; // Entry price
+  avgPrice: string;
   markPrice: string;
   leverage: string;
   unrealisedPnl: string;
@@ -77,6 +77,39 @@ export interface SignParams {
   timestamp: number;
   recvWindow: number;
   queryString: string;
+}
+
+export interface CreateSpotOrderResult {
+  orderId: string;
+  orderLinkId: string;
+}
+
+export interface TradeAck extends CreateSpotOrderResult {
+  requestLatencyMs: number;
+  symbol: string;
+  side: 'Buy' | 'Sell';
+  quoteAmountUsdt: number;
+}
+
+export interface SpotExecution {
+  symbol: string;
+  orderId: string;
+  orderLinkId: string;
+  side: 'Buy' | 'Sell' | string;
+  orderType: string;
+  execFee: string;
+  execId: string;
+  execPrice: string;
+  execQty: string;
+  execValue: string;
+  execTime: string;
+  isMaker?: boolean;
+}
+
+export interface ExecutionListResult {
+  category: string;
+  list: SpotExecution[];
+  nextPageCursor?: string;
 }
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
