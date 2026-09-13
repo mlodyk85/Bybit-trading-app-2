@@ -5,8 +5,8 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AppNavigator } from './src/navigation/AppNavigator';
 import { AppUpdater } from './src/update/AppUpdater';
 
-export const APP_VERSION = '1.3.4';
-export const APP_BUILD = 134;
+export const APP_VERSION = '1.3.5';
+export const APP_BUILD = 135;
 
 export default function App() {
   return (
