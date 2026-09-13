@@ -1,11 +1,12 @@
 import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { CoinBalance, SpotExecution } from '../api/types';
 import { formatCryptoPrecision, formatCurrency } from '../utils/format';
 
 interface AssetRowProps {
   asset: CoinBalance;
   executions?: SpotExecution[];
+  onOpenTrade?: (symbol: string) => void;
 }
 
 function formatUsdt(value: number): string {
@@ -18,7 +19,7 @@ function formatPrice(value: number): string {
   return value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
 }
 
-export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [] }) => {
+export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [], onOpenTrade }) => {
   const symbol = `${asset.coin.toUpperCase()}USDT`;
   const rows = executions
     .filter((item) => item.symbol.toUpperCase() === symbol)
@@ -33,11 +34,20 @@ export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [] }) =>
   const sellPrice = lastSell ? Number(lastSell.execPrice) : NaN;
   const currentValue = Number(asset.usdValue);
   const deltaFromLastBuy = Number.isFinite(currentValue) && Number.isFinite(buyValue) ? currentValue - buyValue : NaN;
+  const tradable = asset.coin.toUpperCase() !== 'USDT';
 
   return (
-    <View style={styles.container}>
+    <TouchableOpacity
+      activeOpacity={tradable ? 0.78 : 1}
+      disabled={!tradable || !onOpenTrade}
+      onPress={() => tradable && onOpenTrade?.(symbol)}
+      style={styles.container}
+    >
       <View style={styles.coinHeader}>
-        <Text style={styles.coinName}>{asset.coin}</Text>
+        <View>
+          <Text style={styles.coinName}>{asset.coin}</Text>
+          {tradable && <Text style={styles.openHint}>Otwórz {symbol} →</Text>}
+        </View>
         <Text style={styles.usdValue}>{formatCurrency(asset.usdValue, 'USD')}</Text>
       </View>
 
@@ -60,7 +70,7 @@ export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [] }) =>
         </View>
       </View>
 
-      {asset.coin.toUpperCase() !== 'USDT' && (
+      {tradable && (
         <View style={styles.tradeBox}>
           <View style={styles.tradeLine}>
             <Text style={styles.tradeLabel}>Ostatni zakup</Text>
@@ -86,10 +96,10 @@ export const AssetRow: React.FC<AssetRowProps> = ({ asset, executions = [] }) =>
               </Text>
             </View>
           )}
-          <Text style={styles.tradeNote}>Kwoty są oparte na ostatnich wykonaniach Spot z API Bybit.</Text>
+          <Text style={styles.tradeNote}>Dotknij aktywa, aby przejść od razu do tej pary Spot.</Text>
         </View>
       )}
-    </View>
+    </TouchableOpacity>
   );
 };
 
@@ -109,6 +119,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   coinName: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
+  openHint: { color: '#F0B90B', fontSize: 10, marginTop: 2 },
   usdValue: { color: '#F0B90B', fontSize: 14, fontWeight: '600' },
   detailsRow: { flexDirection: 'row', justifyContent: 'space-between' },
   detailCol: { flex: 1 },
