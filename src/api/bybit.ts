@@ -89,7 +89,6 @@ export class BybitError extends Error {
 
 export function mapBybitErrorMessage(code: number | string, defaultMsg?: string): string {
   const numericCode = typeof code === 'number' ? code : parseInt(String(code), 10);
-
   switch (numericCode) {
     case 10003:
     case 10004:
@@ -112,23 +111,16 @@ export function mapBybitErrorMessage(code: number | string, defaultMsg?: string)
 }
 
 function validateCredentials(credentials: ApiCredentials): void {
-  if (!credentials.apiKey || !credentials.apiSecret) {
-    throw new BybitError('Brak zapisanych kluczy API.', 'NO_KEYS');
-  }
+  if (!credentials.apiKey || !credentials.apiSecret) throw new BybitError('Brak zapisanych kluczy API.', 'NO_KEYS');
 }
 
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    if (response.status === 429) {
-      throw new BybitError('Przekroczono limit zapytań API.', 429);
-    }
+    if (response.status === 429) throw new BybitError('Przekroczono limit zapytań API.', 429);
     throw new BybitError(`Błąd sieci (HTTP ${response.status})`, response.status);
   }
-
   const json: BybitApiResponse<T> = await response.json();
-  if (json.retCode !== 0) {
-    throw new BybitError(mapBybitErrorMessage(json.retCode, json.retMsg), json.retCode);
-  }
+  if (json.retCode !== 0) throw new BybitError(mapBybitErrorMessage(json.retCode, json.retMsg), json.retCode);
   return json.result;
 }
 
@@ -144,15 +136,11 @@ function normalizeNetworkError(error: unknown): never {
   throw new BybitError(message || 'Wystąpił nieznany błąd połączenia.', 'UNKNOWN');
 }
 
-async function bybitPublicGet<T>(
-  path: string,
-  params: Record<string, string | number | boolean | undefined | null>
-): Promise<T> {
+async function bybitPublicGet<T>(path: string, params: Record<string, string | number | boolean | undefined | null>): Promise<T> {
   const queryString = buildQueryString(params);
   const url = queryString ? `${BYBIT_BASE_URL}${path}?${queryString}` : `${BYBIT_BASE_URL}${path}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
-
   try {
     const response = await fetch(url, { method: 'GET', signal: controller.signal });
     return await parseResponse<T>(response);
@@ -171,17 +159,10 @@ export async function bybitGet<T>(
   validateCredentials(credentials);
   const queryString = buildQueryString(params);
   const timestamp = Date.now();
-  const signature = signBybitRequest({
-    apiKey: credentials.apiKey,
-    apiSecret: credentials.apiSecret,
-    timestamp,
-    recvWindow: RECV_WINDOW,
-    queryString,
-  });
+  const signature = signBybitRequest({ apiKey: credentials.apiKey, apiSecret: credentials.apiSecret, timestamp, recvWindow: RECV_WINDOW, queryString });
   const url = queryString ? `${BYBIT_BASE_URL}${path}?${queryString}` : `${BYBIT_BASE_URL}${path}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
-
   try {
     const response = await fetch(url, {
       method: 'GET',
@@ -210,16 +191,9 @@ export async function bybitPost<T>(
   validateCredentials(credentials);
   const bodyString = JSON.stringify(body);
   const timestamp = Date.now();
-  const signature = signBybitPostBody({
-    apiKey: credentials.apiKey,
-    apiSecret: credentials.apiSecret,
-    timestamp,
-    recvWindow: RECV_WINDOW,
-    bodyString,
-  });
+  const signature = signBybitPostBody({ apiKey: credentials.apiKey, apiSecret: credentials.apiSecret, timestamp, recvWindow: RECV_WINDOW, bodyString });
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
-
   try {
     const response = await fetch(`${BYBIT_BASE_URL}${path}`, {
       method: 'POST',
@@ -285,7 +259,8 @@ export async function fetchSpotUsdtMarketCandidates(limit = 40): Promise<SpotMar
       const spreadPct = ((snapshot.ask - snapshot.bid) / snapshot.lastPrice) * 100;
       return { ...snapshot, spreadPct } as SpotMarketCandidate;
     })
-    .filter((item): item is SpotMarketCandidate => Boolean(item) && item.turnover24h >= 500000 && item.spreadPct >= 0 && item.spreadPct <= 0.5)
+    .filter((item): item is SpotMarketCandidate => item !== null)
+    .filter((item) => item.turnover24h >= 500000 && item.spreadPct >= 0 && item.spreadPct <= 0.5)
     .sort((a, b) => b.turnover24h - a.turnover24h)
     .slice(0, Math.max(5, Math.min(80, limit)));
 }
