@@ -22,6 +22,27 @@ function formatTime(value: string): string {
   return new Date(n).toLocaleString('pl-PL');
 }
 
+function formatNumber(value: number, digits = 6): string {
+  if (!Number.isFinite(value)) return '-';
+  return value.toLocaleString('pl-PL', { maximumFractionDigits: digits });
+}
+
+function getFeeUsdtEquivalent(item: SpotExecution): number | null {
+  const fee = Number(item.execFee);
+  if (!Number.isFinite(fee)) return null;
+  const currency = item.feeCurrency?.toUpperCase();
+  if (currency === 'USDT') return fee;
+
+  const baseCoin = item.symbol.toUpperCase().endsWith('USDT')
+    ? item.symbol.toUpperCase().slice(0, -4)
+    : '';
+  const price = Number(item.execPrice);
+  if (currency && currency === baseCoin && Number.isFinite(price)) {
+    return fee * price;
+  }
+  return null;
+}
+
 export const ReportScreen: React.FC<Props> = ({ credentials }) => {
   const [rows, setRows] = useState<SpotExecution[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,6 +88,8 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
 
         {rows.map((item) => {
           const isBuy = item.side === 'Buy';
+          const feeCurrency = item.feeCurrency || 'waluta prowizji';
+          const feeUsdt = getFeeUsdtEquivalent(item);
           return (
             <View key={`${item.execId}-${item.orderId}`} style={styles.card}>
               <View style={styles.cardTop}>
@@ -74,10 +97,14 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
                 <Text style={[styles.side, isBuy ? styles.buy : styles.sell]}>{item.side.toUpperCase()}</Text>
               </View>
               <Text style={styles.line}>Czas: {formatTime(item.execTime)}</Text>
-              <Text style={styles.line}>Cena: {item.execPrice}</Text>
+              <Text style={styles.line}>Cena: {item.execPrice} USDT</Text>
               <Text style={styles.line}>Ilość: {item.execQty}</Text>
-              <Text style={styles.line}>Wartość: {item.execValue}</Text>
-              <Text style={styles.line}>Fee: {item.execFee}</Text>
+              <Text style={styles.line}>Wartość wykonania: {item.execValue} USDT</Text>
+              <Text style={styles.line}>
+                Prowizja: {item.execFee} {feeCurrency}
+                {feeUsdt !== null ? ` ≈ ${formatNumber(feeUsdt, 4)} USDT` : ''}
+              </Text>
+              {!!item.feeRate && <Text style={styles.line}>Fee rate: {item.feeRate}</Text>}
               <Text style={styles.orderId}>Order ID: {item.orderId}</Text>
             </View>
           );
