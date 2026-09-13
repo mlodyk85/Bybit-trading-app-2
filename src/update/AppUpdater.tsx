@@ -1,6 +1,6 @@
 import * as FileSystem from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const RELEASE_API = 'https://api.github.com/repos/mlodyk85/Bybit-trading-app-2/releases/latest';
@@ -45,6 +45,38 @@ export const AppUpdater: React.FC<Props> = ({ currentVersion }) => {
   const [downloading, setDownloading] = useState(false);
   const [progressText, setProgressText] = useState('');
 
+  const downloadAndInstall = useCallback(async (url: string, tag: string) => {
+    if (downloading || Platform.OS !== 'android') return;
+    setDownloading(true);
+    setProgressText(`Pobieranie ${tag}...`);
+    try {
+      const target = `${FileSystem.cacheDirectory}${APK_NAME}`;
+      const result = await FileSystem.downloadAsync(url, target, {
+        headers: { Accept: 'application/octet-stream' },
+      });
+
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(`HTTP ${result.status}`);
+      }
+
+      setProgressText('Otwieranie instalatora...');
+      const contentUri = await FileSystem.getContentUriAsync(result.uri);
+      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+        data: contentUri,
+        flags: 1,
+        type: 'application/vnd.android.package-archive',
+      });
+    } catch (error: unknown) {
+      Alert.alert(
+        'Aktualizacja nieudana',
+        error instanceof Error ? error.message : 'Nie udało się pobrać lub otworzyć aktualizacji.'
+      );
+    } finally {
+      setDownloading(false);
+      setProgressText('');
+    }
+  }, [downloading]);
+
   useEffect(() => {
     if (Platform.OS !== 'android' || checked.current) return;
     checked.current = true;
@@ -76,39 +108,7 @@ export const AppUpdater: React.FC<Props> = ({ currentVersion }) => {
     };
 
     void check();
-  }, [currentVersion]);
-
-  const downloadAndInstall = async (url: string, tag: string) => {
-    if (downloading || Platform.OS !== 'android') return;
-    setDownloading(true);
-    setProgressText(`Pobieranie ${tag}...`);
-    try {
-      const target = `${FileSystem.cacheDirectory}${APK_NAME}`;
-      const result = await FileSystem.downloadAsync(url, target, {
-        headers: { Accept: 'application/octet-stream' },
-      });
-
-      if (result.status < 200 || result.status >= 300) {
-        throw new Error(`HTTP ${result.status}`);
-      }
-
-      setProgressText('Otwieranie instalatora...');
-      const contentUri = await FileSystem.getContentUriAsync(result.uri);
-      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
-        data: contentUri,
-        flags: 1,
-        type: 'application/vnd.android.package-archive',
-      });
-    } catch (error: unknown) {
-      Alert.alert(
-        'Aktualizacja nieudana',
-        error instanceof Error ? error.message : 'Nie udało się pobrać lub otworzyć aktualizacji.'
-      );
-    } finally {
-      setDownloading(false);
-      setProgressText('');
-    }
-  };
+  }, [currentVersion, downloadAndInstall]);
 
   if (!downloading) return null;
 
