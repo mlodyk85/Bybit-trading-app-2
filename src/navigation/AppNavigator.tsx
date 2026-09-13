@@ -10,6 +10,7 @@ import { PositionsScreen } from '../screens/PositionsScreen';
 import { ReportScreen } from '../screens/ReportScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { SetupScreen } from '../screens/SetupScreen';
+import { SmartScoreScreen } from '../screens/SmartScoreScreen';
 import { TradeScreen } from '../screens/TradeScreen';
 import { loadMaxOrderUsdt, saveMaxOrderUsdt } from '../services/tradingPreferences';
 
@@ -89,7 +90,7 @@ export const AppNavigator: React.FC = () => {
           tabBarStyle: { backgroundColor: '#1E1E1E', borderTopColor: '#2C2C2C', height: 62, paddingBottom: 7, paddingTop: 6 },
           tabBarActiveTintColor: '#F0B90B',
           tabBarInactiveTintColor: '#8E8E93',
-          tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
+          tabBarLabelStyle: { fontSize: 9, fontWeight: '600' },
         }}
       >
         <Tab.Screen name="Portfolio" options={{ tabBarLabel: 'Portfolio', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📊</Text> }}>
@@ -125,6 +126,18 @@ export const AppNavigator: React.FC = () => {
               initialHolding={smartSeed}
               maxOrderUsdt={maxOrderUsdt}
               onHoldingConsumed={() => setSmartSeed(null)}
+            />
+          )}
+        </Tab.Screen>
+
+        <Tab.Screen name="Score" options={{ tabBarLabel: 'Score', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🎯</Text> }}>
+          {({ navigation }) => (
+            <SmartScoreScreen
+              onUseSymbol={(nextSymbol) => {
+                setSelectedTradeSymbol(nextSymbol);
+                setSmartSeed(null);
+                navigation.navigate('Trade');
+              }}
             />
           )}
         </Tab.Screen>
