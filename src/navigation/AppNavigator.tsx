@@ -1,7 +1,9 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { NavigationContainer } from '@react-navigation/native';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { MAX_SPOT_ORDER_USDT } from '../api/bybit';
+import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { useBybitAccount } from '../hooks/useBybitAccount';
 import { PortfolioScreen } from '../screens/PortfolioScreen';
 import { PositionsScreen } from '../screens/PositionsScreen';
@@ -9,10 +11,14 @@ import { ReportScreen } from '../screens/ReportScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { SetupScreen } from '../screens/SetupScreen';
 import { TradeScreen } from '../screens/TradeScreen';
+import { loadMaxOrderUsdt, saveMaxOrderUsdt } from '../services/tradingPreferences';
 
 const Tab = createBottomTabNavigator();
 
 export const AppNavigator: React.FC = () => {
+  const [selectedTradeSymbol, setSelectedTradeSymbol] = useState('BTCUSDT');
+  const [smartSeed, setSmartSeed] = useState<AssetSmartAutoSeed | null>(null);
+  const [maxOrderUsdt, setMaxOrderUsdt] = useState(MAX_SPOT_ORDER_USDT);
   const {
     credentials,
     account,
@@ -31,6 +37,17 @@ export const AppNavigator: React.FC = () => {
     disconnect,
     refresh,
   } = useBybitAccount();
+
+  useEffect(() => {
+    let mounted = true;
+    void loadMaxOrderUsdt().then((value) => { if (mounted) setMaxOrderUsdt(value); });
+    return () => { mounted = false; };
+  }, []);
+
+  const updateMaxOrder = async (value: number) => {
+    const saved = await saveMaxOrderUsdt(value);
+    setMaxOrderUsdt(saved);
+  };
 
   if (isLoading && !credentials) {
     return (
@@ -69,24 +86,16 @@ export const AppNavigator: React.FC = () => {
       <Tab.Navigator
         screenOptions={{
           headerShown: false,
-          tabBarStyle: {
-            backgroundColor: '#1E1E1E',
-            borderTopColor: '#2C2C2C',
-            height: 62,
-            paddingBottom: 7,
-            paddingTop: 6,
-          },
+          tabBarStyle: { backgroundColor: '#1E1E1E', borderTopColor: '#2C2C2C', height: 62, paddingBottom: 7, paddingTop: 6 },
           tabBarActiveTintColor: '#F0B90B',
           tabBarInactiveTintColor: '#8E8E93',
           tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
         }}
       >
-        <Tab.Screen
-          name="Portfolio"
-          options={{ tabBarLabel: 'Portfolio', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📊</Text> }}
-        >
-          {() => (
+        <Tab.Screen name="Portfolio" options={{ tabBarLabel: 'Portfolio', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📊</Text> }}>
+          {({ navigation }) => (
             <PortfolioScreen
+              credentials={credentials}
               account={account}
               connectionState={connectionState}
               errorMessage={errorMessage}
@@ -95,41 +104,44 @@ export const AppNavigator: React.FC = () => {
               autoRefreshEnabled={autoRefreshEnabled}
               onRefresh={refresh}
               onToggleAutoRefresh={setAutoRefreshEnabled}
+              onOpenSmartAuto={(seed) => {
+                setSelectedTradeSymbol(seed.symbol);
+                setSmartSeed(seed);
+                navigation.navigate('Trade');
+              }}
             />
           )}
         </Tab.Screen>
 
-        <Tab.Screen
-          name="Positions"
-          options={{ tabBarLabel: 'Pozycje', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📈</Text> }}
-        >
+        <Tab.Screen name="Positions" options={{ tabBarLabel: 'Pozycje', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📈</Text> }}>
           {() => <PositionsScreen positions={positions} account={account} isRefreshing={isRefreshing} onRefresh={refresh} />}
         </Tab.Screen>
 
-        <Tab.Screen
-          name="Trade"
-          options={{ tabBarLabel: 'Trade', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚡</Text> }}
-        >
-          {() => <TradeScreen credentials={credentials} />}
+        <Tab.Screen name="Trade" options={{ tabBarLabel: 'Trade', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚡</Text> }}>
+          {() => (
+            <TradeScreen
+              credentials={credentials}
+              initialSymbol={selectedTradeSymbol}
+              initialHolding={smartSeed}
+              maxOrderUsdt={maxOrderUsdt}
+              onHoldingConsumed={() => setSmartSeed(null)}
+            />
+          )}
         </Tab.Screen>
 
-        <Tab.Screen
-          name="Report"
-          options={{ tabBarLabel: 'Raport', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🧾</Text> }}
-        >
+        <Tab.Screen name="Report" options={{ tabBarLabel: 'Raport', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🧾</Text> }}>
           {() => <ReportScreen credentials={credentials} />}
         </Tab.Screen>
 
-        <Tab.Screen
-          name="Settings"
-          options={{ tabBarLabel: 'Ustaw.', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚙️</Text> }}
-        >
+        <Tab.Screen name="Settings" options={{ tabBarLabel: 'Ustaw.', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚙️</Text> }}>
           {() => (
             <SettingsScreen
               credentials={credentials}
               connectionState={connectionState}
               autoRefreshInterval={autoRefreshInterval}
+              maxOrderUsdt={maxOrderUsdt}
               onSetAutoRefreshInterval={setAutoRefreshInterval}
+              onSetMaxOrderUsdt={updateMaxOrder}
               onUpdateCredentials={async (key, secret) => await connect(key, secret, true)}
               onTestConnection={testConnection}
               onDisconnect={disconnect}
@@ -142,15 +154,6 @@ export const AppNavigator: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  loadingContainer: {
-    flex: 1,
-    backgroundColor: '#121212',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loadingText: {
-    color: '#8E8E93',
-    fontSize: 14,
-    marginTop: 12,
-  },
+  loadingContainer: { flex: 1, backgroundColor: '#121212', justifyContent: 'center', alignItems: 'center' },
+  loadingText: { color: '#8E8E93', fontSize: 14, marginTop: 12 },
 });
