@@ -194,6 +194,22 @@ export async function testBybitConnection(credentials: ApiCredentials): Promise<
 }
 
 /**
+ * Normalises a requested USDT notional without ever rounding above the user's value.
+ * This is deliberately duplicated as a server-side/API-layer guard instead of relying on UI validation.
+ */
+export function normalizeSpotQuoteAmount(value: number): number {
+  if (!Number.isFinite(value) || value <= 0 || value > MAX_SPOT_ORDER_USDT) {
+    throw new BybitError(`Maksymalna wartość pojedynczej transakcji to ${MAX_SPOT_ORDER_USDT} USDT.`, 'LIMIT');
+  }
+
+  const truncated = Math.floor((value + Number.EPSILON) * 100) / 100;
+  if (truncated <= 0 || truncated > MAX_SPOT_ORDER_USDT) {
+    throw new BybitError(`Maksymalna wartość pojedynczej transakcji to ${MAX_SPOT_ORDER_USDT} USDT.`, 'LIMIT');
+  }
+  return truncated;
+}
+
+/**
  * Places a SPOT market order quoted in USDT.
  * Hard safety cap: <= 10 USDT per request.
  * No leverage, no margin, no derivatives.
@@ -208,8 +224,11 @@ export async function placeSpotMarketOrder(
   if (!/^[A-Z0-9]{2,30}USDT$/.test(symbol)) {
     throw new BybitError('Obsługiwane są pary Spot zakończone na USDT, np. BTCUSDT.', 'INVALID_SYMBOL');
   }
-  if (!Number.isFinite(quoteAmountUsdt) || quoteAmountUsdt <= 0 || quoteAmountUsdt > MAX_SPOT_ORDER_USDT) {
-    throw new BybitError(`Maksymalna wartość pojedynczej transakcji to ${MAX_SPOT_ORDER_USDT} USDT.`, 'LIMIT');
+
+  const safeQuoteAmount = normalizeSpotQuoteAmount(quoteAmountUsdt);
+  const qty = safeQuoteAmount.toFixed(2);
+  if (Number(qty) > MAX_SPOT_ORDER_USDT) {
+    throw new BybitError('Zlecenie zablokowane przez twardy limit bezpieczeństwa.', 'LIMIT_GUARD');
   }
 
   const orderLinkId = `app-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
@@ -221,7 +240,7 @@ export async function placeSpotMarketOrder(
       symbol,
       side,
       orderType: 'Market',
-      qty: quoteAmountUsdt.toFixed(2),
+      qty,
       marketUnit: 'quoteCoin',
       isLeverage: 0,
       orderFilter: 'Order',
@@ -235,7 +254,7 @@ export async function placeSpotMarketOrder(
     requestLatencyMs: Date.now() - startedAt,
     symbol,
     side,
-    quoteAmountUsdt,
+    quoteAmountUsdt: safeQuoteAmount,
   };
 }
 
