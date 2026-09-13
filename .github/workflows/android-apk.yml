@@ -33,8 +33,8 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=dev
 
-      - name: Install native updater modules
-        run: npx expo install expo-file-system expo-intent-launcher
+      - name: Install native runtime modules
+        run: npx expo install expo-file-system expo-intent-launcher expo-background-fetch expo-task-manager expo-notifications
 
       - name: Lint check
         run: npm run lint
