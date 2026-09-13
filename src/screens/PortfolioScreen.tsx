@@ -12,7 +12,7 @@ import {
 import { fetchSpotExecutions } from '../api/bybit';
 import { ApiCredentials, ConnectionState, SpotExecution, WalletAccountResult } from '../api/types';
 import { AccountSummary } from '../components/AccountSummary';
-import { AssetRow } from '../components/AssetRow';
+import { AssetRow, AssetSmartAutoSeed } from '../components/AssetRow';
 import { ConnectionStatus } from '../components/ConnectionStatus';
 import { filterNonZeroAssets, formatTime } from '../utils/format';
 
@@ -26,7 +26,7 @@ interface PortfolioScreenProps {
   autoRefreshEnabled: boolean;
   onRefresh: () => void;
   onToggleAutoRefresh: (enabled: boolean) => void;
-  onOpenTrade: (symbol: string) => void;
+  onOpenSmartAuto: (seed: AssetSmartAutoSeed) => void;
 }
 
 export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
@@ -39,7 +39,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
   autoRefreshEnabled,
   onRefresh,
   onToggleAutoRefresh,
-  onOpenTrade,
+  onOpenSmartAuto,
 }) => {
   const nonZeroAssets = filterNonZeroAssets(account?.coin);
   const [executions, setExecutions] = useState<SpotExecution[]>([]);
@@ -70,7 +70,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
       <FlatList
         data={nonZeroAssets}
         keyExtractor={(item) => item.coin}
-        renderItem={({ item }) => <AssetRow asset={item} executions={executions} onOpenTrade={onOpenTrade} />}
+        renderItem={({ item }) => <AssetRow asset={item} executions={executions} onOpenTrade={onOpenSmartAuto} />}
         contentContainerStyle={styles.scrollContent}
         refreshControl={
           <RefreshControl
@@ -84,16 +84,8 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
           <>
             <View style={styles.headerRow}>
               <Text style={styles.headerTitle}>Bybit Portfolio</Text>
-              <TouchableOpacity
-                style={styles.refreshIconButton}
-                onPress={refreshAll}
-                disabled={isRefreshing || historyLoading}
-              >
-                {isRefreshing || historyLoading ? (
-                  <ActivityIndicator size="small" color="#F0B90B" />
-                ) : (
-                  <Text style={styles.refreshIconText}>🔄 Odśwież</Text>
-                )}
+              <TouchableOpacity style={styles.refreshIconButton} onPress={refreshAll} disabled={isRefreshing || historyLoading}>
+                {isRefreshing || historyLoading ? <ActivityIndicator size="small" color="#F0B90B" /> : <Text style={styles.refreshIconText}>🔄 Odśwież</Text>}
               </TouchableOpacity>
             </View>
 
@@ -101,10 +93,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
             <AccountSummary account={account} />
 
             <View style={styles.refreshControlBar}>
-              <Text style={styles.lastRefreshText}>
-                Ostatnie odświeżenie: {formatTime(lastRefreshTime)}
-              </Text>
-
+              <Text style={styles.lastRefreshText}>Ostatnie odświeżenie: {formatTime(lastRefreshTime)}</Text>
               <View style={styles.autoRefreshGroup}>
                 <Text style={styles.autoRefreshLabel}>Auto-refresh</Text>
                 <Switch
@@ -118,25 +107,19 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
             </View>
 
             <View style={styles.infoBox}>
-              <Text style={styles.infoTitle}>Historia ceny wejścia/wyjścia</Text>
+              <Text style={styles.infoTitle}>Smart Auto z aktywów</Text>
               <Text style={styles.infoText}>
-                Dotknij aktywa, aby otworzyć od razu jego parę USDT. Pokazujemy ostatni BUY, SELL i obecną wartość.
+                Przy kryptowalucie z historią BUY możesz wejść bezpośrednio do Smart Auto. Bot najpierw zarządza tą pozycją według realnego PnL netto, a po sprzedaży wraca do USDT i szuka kolejnej płynnej pary.
               </Text>
             </View>
 
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Aktywa na koncie</Text>
-              <Text style={styles.sectionSubtitle}>
-                {nonZeroAssets.length} {nonZeroAssets.length === 1 ? 'aktywum' : 'aktywów'}
-              </Text>
+              <Text style={styles.sectionSubtitle}>{nonZeroAssets.length} {nonZeroAssets.length === 1 ? 'aktywum' : 'aktywów'}</Text>
             </View>
           </>
         }
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>Brak aktywów z dodatnim saldem.</Text>
-          </View>
-        }
+        ListEmptyComponent={<View style={styles.emptyContainer}><Text style={styles.emptyText}>Brak aktywów z dodatnim saldem.</Text></View>}
       />
     </View>
   );
@@ -153,9 +136,9 @@ const styles = StyleSheet.create({
   lastRefreshText: { color: '#8E8E93', fontSize: 12 },
   autoRefreshGroup: { flexDirection: 'row', alignItems: 'center' },
   autoRefreshLabel: { color: '#CCCCCC', fontSize: 12, marginRight: 4 },
-  infoBox: { backgroundColor: '#191919', borderWidth: 1, borderColor: '#2F2F2F', borderRadius: 8, padding: 10, marginTop: 8 },
-  infoTitle: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
-  infoText: { color: '#8E8E93', fontSize: 11, lineHeight: 16, marginTop: 4 },
+  infoBox: { backgroundColor: '#191919', borderWidth: 1, borderColor: '#F0B90B', borderRadius: 8, padding: 10, marginTop: 8 },
+  infoTitle: { color: '#F0B90B', fontSize: 12, fontWeight: '800' },
+  infoText: { color: '#B8B8BC', fontSize: 11, lineHeight: 16, marginTop: 4 },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, marginBottom: 8 },
   sectionTitle: { color: '#FFFFFF', fontSize: 18, fontWeight: '700' },
   sectionSubtitle: { color: '#8E8E93', fontSize: 12 },
