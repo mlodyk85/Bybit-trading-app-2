@@ -3,9 +3,10 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AppNavigator } from './src/navigation/AppNavigator';
+import { AppUpdater } from './src/update/AppUpdater';
 
-export const APP_VERSION = '1.3.0';
-export const APP_BUILD = 130;
+export const APP_VERSION = '1.3.1';
+export const APP_BUILD = 131;
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
         <View style={styles.appBody}>
           <AppNavigator />
         </View>
+        <AppUpdater currentVersion={APP_VERSION} />
       </SafeAreaView>
     </SafeAreaProvider>
   );

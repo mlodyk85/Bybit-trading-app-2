@@ -217,7 +217,7 @@ export const TradeScreen: React.FC<Props> = ({ credentials }) => {
         </View>
 
         <View style={styles.autoCard}>
-          <View style={styles.autoHeader}><View style={{ flex: 1 }}><Text style={styles.autoTitle}>AUTONOMOUS</Text><Text style={styles.autoSub}>Prawdziwy handel • jedna pozycja naraz</Text></View><Switch value={autoEnabled} onValueChange={(v) => !autoRunning && setAutoEnabled(v)} disabled={autoRunning} /></View>
+          <View style={styles.autoHeader}><View style={{ flex: 1 }}><Text style={styles.autoTitle}>AUTONOMOUS</Text><Text style={styles.autoSub}>Prawdziwy handel • jedna pozycja naraz</Text></View><Switch value={autoEnabled} onValueChange={(v) => { if (!autoRunning) setAutoEnabled(v); }} disabled={autoRunning} /></View>
           {autoEnabled && <>
             <Text style={styles.autoNotice}>Bot używa realnego konta Bybit. Cel zysku jest warunkiem zatrzymania, a nie gwarancją zarobku.</Text>
             <View style={styles.grid}>

@@ -7,6 +7,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,6 +32,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --include=dev
+
+      - name: Install native updater modules
+        run: npx expo install expo-file-system expo-intent-launcher
 
       - name: Lint check
         run: npm run lint
@@ -68,3 +74,18 @@ jobs:
           name: bybit-trading-app-release-apk
           path: bybit-trading-app-release.apk
           retention-days: 30
+
+      - name: Publish or update GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version")
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" bybit-trading-app-release.apk --clobber
+          else
+            gh release create "$TAG" bybit-trading-app-release.apk \
+              --title "Bybit Trading App ${TAG}" \
+              --notes "Automatyczny build Android. Aplikacja sama sprawdza nowsze wydania i może pobrać APK do aktualizacji."
+          fi

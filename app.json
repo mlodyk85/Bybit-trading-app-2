@@ -2,7 +2,7 @@
   "expo": {
     "name": "Bybit Trading App",
     "slug": "bybit-trading-app",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "splash": {
@@ -14,10 +14,13 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "130"
+      "buildNumber": "131"
     },
     "android": {
-      "versionCode": 130,
+      "versionCode": 131,
+      "permissions": [
+        "REQUEST_INSTALL_PACKAGES"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#121212"
       },
