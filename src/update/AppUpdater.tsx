@@ -55,7 +55,7 @@ export async function checkLatestUpdate(currentVersion: string): Promise<Availab
   return { tag: release.tag_name, downloadUrl: asset.browser_download_url };
 }
 
-export async function downloadAndInstallUpdate(url: string): Promise<void> {
+export async function downloadAndInstallUpdate(url: string, _tag?: string): Promise<void> {
   if (Platform.OS !== 'android') throw new Error('Aktualizacja APK jest dostępna tylko na Androidzie.');
   const target = `${FileSystem.cacheDirectory}${APK_NAME}`;
   const result = await FileSystem.downloadAsync(url, target, { headers: { Accept: 'application/octet-stream' } });
@@ -78,7 +78,7 @@ export const AppUpdater: React.FC<Props> = ({ currentVersion }) => {
     setDownloading(true);
     setProgressText(`Pobieranie ${tag}...`);
     try {
-      await downloadAndInstallUpdate(url);
+      await downloadAndInstallUpdate(url, tag);
       setProgressText('Otwieranie instalatora...');
     } catch (error: unknown) {
       Alert.alert('Aktualizacja nieudana', error instanceof Error ? error.message : 'Nie udało się pobrać lub otworzyć aktualizacji.');
