@@ -55,9 +55,10 @@ export async function checkLatestUpdate(currentVersion: string): Promise<Availab
   return { tag: release.tag_name, downloadUrl: asset.browser_download_url };
 }
 
-export async function downloadAndInstallUpdate(url: string, _tag?: string): Promise<void> {
+export async function downloadAndInstallUpdate(url: string, tag?: string): Promise<void> {
   if (Platform.OS !== 'android') throw new Error('Aktualizacja APK jest dostępna tylko na Androidzie.');
-  const target = `${FileSystem.cacheDirectory}${APK_NAME}`;
+  const safeTag = (tag || 'latest').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const target = `${FileSystem.cacheDirectory}bybit-trading-app-${safeTag}.apk`;
   const result = await FileSystem.downloadAsync(url, target, { headers: { Accept: 'application/octet-stream' } });
   if (result.status < 200 || result.status >= 300) throw new Error(`Pobieranie APK: HTTP ${result.status}`);
   const contentUri = await FileSystem.getContentUriAsync(result.uri);
