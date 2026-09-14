@@ -25,7 +25,9 @@ interface SpotInstrument {
   status: string;
   lotSizeFilter?: {
     basePrecision?: string;
+    qtyStep?: string;
     minOrderQty?: string;
+    minOrderAmt?: string;
     maxOrderQty?: string;
   };
 }
@@ -362,12 +364,25 @@ export async function placeSpotMarketSellBase(
   if (!Number.isFinite(baseQtyInput) || baseQtyInput <= 0) throw new BybitError('Nieprawidłowa ilość aktywa do sprzedaży.', 'INVALID_QTY');
 
   const instrument = await fetchSpotInstrument(symbol);
-  const precision = Math.min(12, decimalPlaces(instrument.lotSizeFilter?.basePrecision));
+  const stepText = instrument.lotSizeFilter?.qtyStep || instrument.lotSizeFilter?.basePrecision || '0.00000001';
+  const step = Number(stepText);
+  const precision = Math.min(12, decimalPlaces(stepText));
   const factor = 10 ** precision;
-  const baseQty = Math.floor(baseQtyInput * factor) / factor;
+  const steppedQty = step > 0 ? Math.floor((baseQtyInput + Number.EPSILON) / step) * step : baseQtyInput;
+  const baseQty = Math.floor((steppedQty + Number.EPSILON) * factor) / factor;
   const minQty = Number(instrument.lotSizeFilter?.minOrderQty || '0');
   if (baseQty <= 0 || (minQty > 0 && baseQty < minQty)) {
     throw new BybitError('Ilość po zaokrągleniu jest mniejsza niż minimum Bybit.', 'MIN_QTY');
+  }
+
+  const minOrderAmt = Number(instrument.lotSizeFilter?.minOrderAmt || '0');
+  if (minOrderAmt > 0) {
+    const snapshot = await fetchSpotMarketSnapshot(symbol);
+    const executablePrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
+    const estimatedValue = baseQty * executablePrice;
+    if (estimatedValue + 1e-8 < minOrderAmt) {
+      throw new BybitError(`Wartość pozycji ${estimatedValue.toFixed(2)} USDT jest poniżej minimum Bybit ${minOrderAmt.toFixed(2)} USDT.`, 'MIN_ORDER_AMT');
+    }
   }
 
   const orderLinkId = `auto-s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
