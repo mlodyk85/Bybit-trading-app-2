@@ -12,6 +12,8 @@ import {
 import { ABSOLUTE_MAX_SPOT_ORDER_USDT } from '../api/bybit';
 import { ApiCredentials, ConnectionState } from '../api/types';
 import { AutoRefreshInterval } from '../hooks/useBybitAccount';
+import { checkLatestUpdate, downloadAndInstallUpdate } from '../update/AppUpdater';
+import { APP_BUILD, APP_VERSION } from '../version';
 
 interface SettingsScreenProps {
   credentials: ApiCredentials | null;
@@ -42,8 +44,48 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [isUpdating, setIsUpdating] = useState<boolean>(false);
   const [isTesting, setIsTesting] = useState<boolean>(false);
   const [orderLimitText, setOrderLimitText] = useState(String(maxOrderUsdt));
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
 
   useEffect(() => setOrderLimitText(String(maxOrderUsdt)), [maxOrderUsdt]);
+
+  const handleCheckUpdate = async () => {
+    if (isCheckingUpdate || isInstallingUpdate) return;
+    setIsCheckingUpdate(true);
+    try {
+      const update = await checkLatestUpdate(APP_VERSION);
+      if (!update) {
+        Alert.alert('Brak nowszej wersji', `Masz aktualną wersję v${APP_VERSION} • build ${APP_BUILD}.`);
+        return;
+      }
+      Alert.alert(
+        'Dostępna aktualizacja',
+        `Zainstalowana: v${APP_VERSION}\nDostępna: ${update.tag}\n\nPobrać i otworzyć instalator Android?`,
+        [
+          { text: 'Anuluj', style: 'cancel' },
+          {
+            text: 'Aktualizuj',
+            onPress: () => {
+              void (async () => {
+                setIsInstallingUpdate(true);
+                try {
+                  await downloadAndInstallUpdate(update.downloadUrl, update.tag);
+                } catch (error: unknown) {
+                  Alert.alert('Aktualizacja nieudana', error instanceof Error ? error.message : 'Nie udało się pobrać aktualizacji.');
+                } finally {
+                  setIsInstallingUpdate(false);
+                }
+              })();
+            },
+          },
+        ]
+      );
+    } catch (error: unknown) {
+      Alert.alert('Nie udało się sprawdzić aktualizacji', error instanceof Error ? error.message : 'Sprawdź połączenie z internetem.');
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
 
   const handleUpdate = async () => {
     if (!apiKey.trim() || !apiSecret.trim()) {
@@ -53,7 +95,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
     setIsUpdating(true);
     const success = await onUpdateCredentials(apiKey, apiSecret);
     setIsUpdating(false);
-
     if (success) Alert.alert('Sukces', 'Klucze API zostały pomyślnie zaktualizowane.');
     else Alert.alert('Błąd', 'Nie udało się połączyć przy użyciu podanych kluczy.');
   };
@@ -116,6 +157,21 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
     <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
       <Text style={styles.headerTitle}>Ustawienia</Text>
 
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Aktualizacja aplikacji</Text>
+        <Text style={styles.updateVersion}>Zainstalowana: v{APP_VERSION} • build {APP_BUILD}</Text>
+        <Text style={styles.updateHint}>Sprawdź ręcznie najnowszy APK z GitHub Release. Po pobraniu Android otworzy standardowy instalator.</Text>
+        <TouchableOpacity
+          style={[styles.updateButton, (isCheckingUpdate || isInstallingUpdate) && styles.disabledButton]}
+          onPress={handleCheckUpdate}
+          disabled={isCheckingUpdate || isInstallingUpdate}
+        >
+          {isCheckingUpdate || isInstallingUpdate
+            ? <ActivityIndicator color="#000000" />
+            : <Text style={styles.updateButtonText}>SPRAWDŹ I AKTUALIZUJ</Text>}
+        </TouchableOpacity>
+      </View>
+
       <View style={styles.readOnlyBanner}>
         <Text style={styles.readOnlyBadge}>SPOT TRADING MODE</Text>
         <Text style={styles.readOnlyText}>
@@ -125,20 +181,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Limit pojedynczej transakcji Spot</Text>
-        <Text style={styles.riskText}>
-          Domyślnie 10 USDT. Zwiększaj tylko świadomie — Smart Auto i ręczne BUY używają tego samego limitu bezpieczeństwa.
-        </Text>
-        <TextInput
-          style={styles.input}
-          value={orderLimitText}
-          onChangeText={setOrderLimitText}
-          keyboardType="decimal-pad"
-          placeholder="np. 10"
-          placeholderTextColor="#666666"
-        />
-        <TouchableOpacity style={styles.limitButton} onPress={saveOrderLimit}>
-          <Text style={styles.limitButtonText}>Zapisz limit z potwierdzeniem ryzyka</Text>
-        </TouchableOpacity>
+        <Text style={styles.riskText}>Domyślnie 10 USDT. Zwiększaj tylko świadomie — Smart Auto i ręczne BUY używają tego samego limitu bezpieczeństwa.</Text>
+        <TextInput style={styles.input} value={orderLimitText} onChangeText={setOrderLimitText} keyboardType="decimal-pad" placeholder="np. 10" placeholderTextColor="#666666" />
+        <TouchableOpacity style={styles.limitButton} onPress={saveOrderLimit}><Text style={styles.limitButtonText}>Zapisz limit z potwierdzeniem ryzyka</Text></TouchableOpacity>
       </View>
 
       <View style={styles.section}>
@@ -155,11 +200,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         <Text style={styles.sectionTitle}>Częstotliwość Auto-Refresh</Text>
         <View style={styles.intervalRow}>
           {intervals.map((sec) => (
-            <TouchableOpacity
-              key={sec}
-              style={[styles.intervalOption, autoRefreshInterval === sec && styles.intervalOptionSelected]}
-              onPress={() => onSetAutoRefreshInterval(sec)}
-            >
+            <TouchableOpacity key={sec} style={[styles.intervalOption, autoRefreshInterval === sec && styles.intervalOptionSelected]} onPress={() => onSetAutoRefreshInterval(sec)}>
               <Text style={[styles.intervalOptionText, autoRefreshInterval === sec && styles.intervalOptionTextSelected]}>{sec} sec</Text>
             </TouchableOpacity>
           ))}
@@ -170,15 +211,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         <Text style={styles.sectionTitle}>Edycja Klucza API</Text>
         <Text style={styles.inputLabel}>API Key</Text>
         <TextInput style={styles.input} value={apiKey} onChangeText={setApiKey} autoCapitalize="none" autoCorrect={false} placeholder="Nowy API Key" placeholderTextColor="#666666" />
-
         <Text style={styles.inputLabel}>API Secret</Text>
         <View style={styles.secretContainer}>
           <TextInput style={styles.secretInput} value={apiSecret} onChangeText={setApiSecret} secureTextEntry={!showSecret} autoCapitalize="none" autoCorrect={false} placeholder="Nowy API Secret" placeholderTextColor="#666666" />
-          <TouchableOpacity style={styles.toggleSecretButton} onPress={() => setShowSecret(!showSecret)}>
-            <Text style={styles.toggleSecretText}>{showSecret ? 'Ukryj' : 'Pokaż'}</Text>
-          </TouchableOpacity>
+          <TouchableOpacity style={styles.toggleSecretButton} onPress={() => setShowSecret(!showSecret)}><Text style={styles.toggleSecretText}>{showSecret ? 'Ukryj' : 'Pokaż'}</Text></TouchableOpacity>
         </View>
-
         <View style={styles.buttonRow}>
           <TouchableOpacity style={[styles.saveButton, isUpdating && styles.disabledButton]} onPress={handleUpdate} disabled={isUpdating || isTesting}>
             {isUpdating ? <ActivityIndicator color="#000000" /> : <Text style={styles.saveButtonText}>Zapisz Zmiany</Text>}
@@ -191,12 +228,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
 
       <View style={[styles.section, styles.dangerSection]}>
         <Text style={styles.dangerTitle}>Strefa Bezpieczeństwa</Text>
-        <Text style={styles.dangerDescription}>
-          Usunięcie danych API wyloguje aplikację i wyczyści zapisany klucz oraz secret z bezpiecznego magazynu pamięci (Expo SecureStore).
-        </Text>
-        <TouchableOpacity style={styles.deleteButton} onPress={handleRemoveData}>
-          <Text style={styles.deleteButtonText}>Usuń dane API</Text>
-        </TouchableOpacity>
+        <Text style={styles.dangerDescription}>Usunięcie danych API wyloguje aplikację i wyczyści zapisany klucz oraz secret z bezpiecznego magazynu pamięci (Expo SecureStore).</Text>
+        <TouchableOpacity style={styles.deleteButton} onPress={handleRemoveData}><Text style={styles.deleteButtonText}>Usuń dane API</Text></TouchableOpacity>
       </View>
     </ScrollView>
   );
@@ -211,6 +244,10 @@ const styles = StyleSheet.create({
   readOnlyText: { color: '#CCCCCC', fontSize: 12, lineHeight: 18 },
   section: { backgroundColor: '#1E1E1E', borderRadius: 10, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: '#2C2C2C' },
   sectionTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', marginBottom: 12 },
+  updateVersion: { color: '#F0B90B', fontSize: 13, fontWeight: '800', marginBottom: 6 },
+  updateHint: { color: '#AAAAAA', fontSize: 12, lineHeight: 17, marginBottom: 12 },
+  updateButton: { backgroundColor: '#F0B90B', borderRadius: 8, paddingVertical: 13, alignItems: 'center' },
+  updateButtonText: { color: '#000000', fontSize: 13, fontWeight: '900' },
   riskText: { color: '#F0B90B', fontSize: 12, lineHeight: 17, marginBottom: 10 },
   statusBox: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
   statusLabel: { color: '#AAAAAA', fontSize: 14 },
