@@ -69,6 +69,7 @@ const MAX_ENTRY_MOMENTUM_PCT = 2.5;
 const MAX_SPREAD_PCT = 0.20;
 const TRAIL_ARM_MOVE_PCT = 0.18;
 const TRAIL_DROP_PCT = 0.07;
+const SMART_MIN_TRADE_USDT = 10;
 
 export const TradeScreen: React.FC<Props> = ({
   credentials,
@@ -78,7 +79,7 @@ export const TradeScreen: React.FC<Props> = ({
   onHoldingConsumed,
 }) => {
   const [symbol, setSymbol] = useState(initialSymbol);
-  const [amount, setAmount] = useState(String(Math.min(5, maxOrderUsdt)));
+  const [amount, setAmount] = useState(String(Math.min(10, maxOrderUsdt)));
   const [busy, setBusy] = useState(false);
   const [lastAck, setLastAck] = useState<TradeAck | null>(null);
   const [error, setError] = useState('');
@@ -116,6 +117,7 @@ export const TradeScreen: React.FC<Props> = ({
   const shadowUsdtRef = useRef(25);
   const sessionProfitRef = useRef(0);
   const cycleCountRef = useRef(0);
+  const sellBusyRef = useRef(false);
 
   useEffect(() => {
     if (!smartRunning && initialSymbol) setSymbol(initialSymbol.toUpperCase());
@@ -124,7 +126,7 @@ export const TradeScreen: React.FC<Props> = ({
 
   useEffect(() => {
     const value = toNumber(amount);
-    if (!Number.isFinite(value) || value <= 0 || value > maxOrderUsdt) setAmount(String(Math.min(5, maxOrderUsdt)));
+    if (!Number.isFinite(value) || value <= 0 || value > maxOrderUsdt) setAmount(String(Math.min(10, maxOrderUsdt)));
   }, [amount, maxOrderUsdt]);
 
   useEffect(() => {
@@ -417,46 +419,41 @@ export const TradeScreen: React.FC<Props> = ({
     );
   };
 
-  const confirmAssistSell = (position: TrackedPosition) => {
+  const executeAssistSell = async (position: TrackedPosition) => {
+    if (sellBusyRef.current || busy) return;
     if (!position.sellReady || position.currentPnlUsdt <= 0) {
       setError('SMART AUTO nie wystawia SELL na stracie. Pozycja pozostaje w monitoringu.');
       return;
     }
-    Alert.alert(
-      'Potwierdź SELL',
-      `${position.symbol} • ruch +${position.currentMovePct.toFixed(4)}% • PnL +${position.currentPnlUsdt.toFixed(4)} USDT?`,
-      [
-        { text: 'Anuluj', style: 'cancel' },
-        {
-          text: 'SPRZEDAJ',
-          style: 'destructive',
-          onPress: async () => {
-            setBusy(true);
-            setError('');
-            try {
-              const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty);
-              const fill = await waitForSpotFill(credentials, ack.orderId);
-              const pnl = fill.quoteValue - position.costUsdt;
-              livePositionsRef.current = livePositionsRef.current.filter((item) => item.id !== position.id);
-              setLivePositions([...livePositionsRef.current]);
-              cycleCountRef.current += 1;
-              sessionProfitRef.current += pnl;
-              setCycleCount(cycleCountRef.current);
-              setSessionProfit(sessionProfitRef.current);
-              if (position.fromPortfolio) onHoldingConsumed?.();
-              setSmartStatus(`SELL ${position.symbol} • wynik ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} USDT. Skaner działa dalej.`);
-              await refreshAvailableUsdt();
-            } catch (e: unknown) {
-              const message = e instanceof Error ? e.message : 'Błąd SELL.';
-              setError(message);
-              setSmartStatus(`SELL nieudany: ${message}. Skaner nadal monitoruje pozycje.`);
-            } finally {
-              setBusy(false);
-            }
-          },
-        },
-      ]
-    );
+
+    sellBusyRef.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty);
+      const fill = await waitForSpotFill(credentials, ack.orderId);
+      const pnl = fill.quoteValue - position.costUsdt;
+      livePositionsRef.current = livePositionsRef.current.filter((item) => item.id !== position.id);
+      setLivePositions([...livePositionsRef.current]);
+      cycleCountRef.current += 1;
+      sessionProfitRef.current += pnl;
+      setCycleCount(cycleCountRef.current);
+      setSessionProfit(sessionProfitRef.current);
+      if (position.fromPortfolio) onHoldingConsumed?.();
+      setSmartStatus(`SELL ${position.symbol} • wynik ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} USDT. Skaner działa dalej.`);
+      await refreshAvailableUsdt();
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Błąd SELL.';
+      const lowerLimit = /lower limit|minimum|min order|minimal/i.test(message);
+      const shown = lowerLimit
+        ? 'Pozycja jest za mała dla minimalnej wartości zlecenia Bybit. Nie została sprzedana.'
+        : message;
+      setError(shown);
+      setSmartStatus(`SELL nieudany: ${shown} Skaner nadal monitoruje pozycję.`);
+    } finally {
+      sellBusyRef.current = false;
+      setBusy(false);
+    }
   };
 
   const startSmart = () => {
@@ -468,10 +465,11 @@ export const TradeScreen: React.FC<Props> = ({
     const virtualCapital = toNumber(shadowCapital);
 
     if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
+    if (trade < SMART_MIN_TRADE_USDT) return setError(`SMART AUTO i DEMO wymagają minimum ${SMART_MIN_TRADE_USDT} USDT na jedną pozycję.`);
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
     if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Minimalna liczba cykli: 1–1000.');
-    if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał SHADOW: minimum 10 USDT i co najmniej wartość jednej transakcji.');
+    if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
 
     stopRef.current = false;
     scanCountRef.current = 0;
@@ -528,7 +526,7 @@ export const TradeScreen: React.FC<Props> = ({
                   shadowUsdtRef.current += proceeds;
                   sessionProfitRef.current += pnl;
                   cycleCountRef.current += 1;
-                  setSmartStatus(`SHADOW SELL ${updated.symbol} • +${pnl.toFixed(4)} USDT • szukam dalej.`);
+                  setSmartStatus(`DEMO SELL ${updated.symbol} • +${pnl.toFixed(4)} USDT • szukam dalej.`);
                 } else {
                   refreshed.push({ ...updated, sellReady: false });
                 }
@@ -566,10 +564,10 @@ export const TradeScreen: React.FC<Props> = ({
                 shadowPositionsRef.current = [...shadowPositionsRef.current, position];
                 setShadowPositions([...shadowPositionsRef.current]);
                 setShadowUsdt(shadowUsdtRef.current);
-                setSmartStatus(`SHADOW BUY ${position.symbol} ${trade.toFixed(2)} USDT • sloty ${shadowPositionsRef.current.length}/${slots} • trzymam do zysku.`);
+                setSmartStatus(`DEMO BUY ${position.symbol} ${trade.toFixed(2)} USDT • sloty ${shadowPositionsRef.current.length}/${slots} • trzymam do zysku.`);
               }
             } else {
-              setSmartStatus(`SHADOW: monitoruję ${refreshed.length}/${slots} pozycji. Pozycje na minusie pozostają otwarte.`);
+              setSmartStatus(`DEMO: monitoruję ${refreshed.length}/${slots} pozycji. Pozycje na minusie pozostają otwarte.`);
               await sleep(1600);
             }
           } else {
@@ -662,11 +660,11 @@ export const TradeScreen: React.FC<Props> = ({
           </View>
 
           {smartEnabled && <>
-            <Text style={styles.smartNotice}>SMART AUTO skanuje cały wybrany rynek, preferuje płynne BTC/ETH/BNB/SOL/XRP/LINK/ADA/AVAX/DOGE i czeka na mocniejszy ruch. Po BUY pozycja jest trzymana do zysku; trailing uzbraja się dopiero od +{TRAIL_ARM_MOVE_PCT.toFixed(2)}%. SHADOW wykonuje tę samą strategię symulacyjnie. Realny BUY/SELL nadal wymaga potwierdzenia.</Text>
+            <Text style={styles.smartNotice}>SMART AUTO skanuje cały wybrany rynek, preferuje płynne BTC/ETH/BNB/SOL/XRP/LINK/ADA/AVAX/DOGE i czeka na mocniejszy ruch. Po BUY pozycja jest trzymana do zysku; trailing uzbraja się dopiero od +{TRAIL_ARM_MOVE_PCT.toFixed(2)}%. DEMO wykonuje tę samą strategię symulacyjnie i nie wysyła zleceń do Bybit. Realny BUY wymaga potwierdzenia, a SELL READY wykonujesz jednym kliknięciem.</Text>
 
             <View style={styles.modeRow}>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>SMART AUTO</Text></TouchableOpacity>
-              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>SHADOW</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
 
             <View style={styles.grid}>
@@ -678,7 +676,7 @@ export const TradeScreen: React.FC<Props> = ({
               <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty 1–3</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
             </View>
             {smartMode === 'shadow' ? (
-              <><Text style={styles.smallLabel}>Kapitał SHADOW (min. 10 USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
+              <><Text style={styles.smallLabel}>Kapitał DEMO (min. 10 USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
             ) : (
               <Text style={styles.balanceText}>Wolne USDT: {availableUsdt.toFixed(2)}</Text>
             )}
@@ -707,7 +705,7 @@ export const TradeScreen: React.FC<Props> = ({
                     <Text style={styles.positionLine}>wejście {priceText(position.entryPrice)} • ruch {position.currentMovePct >= 0 ? '+' : ''}{position.currentMovePct.toFixed(4)}%</Text>
                     <Text style={styles.positionLine}>max +{Math.max(0, position.peakMovePct).toFixed(4)}% • PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
                   </View>
-                  {smartMode === 'assist' && position.sellReady && <TouchableOpacity disabled={busy} style={styles.sellReady} onPress={() => confirmAssistSell(position)}><Text style={styles.buttonText}>SELL</Text></TouchableOpacity>}
+                  {smartMode === 'assist' && position.sellReady && <TouchableOpacity disabled={busy} style={[styles.sellReady, busy && { opacity: 0.6 }]} onPress={() => void executeAssistSell(position)}><Text style={styles.buttonText}>SELL</Text></TouchableOpacity>}
                 </View>
               );
             })}
@@ -715,7 +713,7 @@ export const TradeScreen: React.FC<Props> = ({
             {smartRunning ? (
               <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP SKANERA</Text></TouchableOpacity>
             ) : (
-              <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START SMART AUTO' : 'START SHADOW'}</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START SMART AUTO' : 'START DEMO'}</Text></TouchableOpacity>
             )}
           </>}
         </View>
