@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   SafeAreaView,
@@ -11,12 +11,28 @@ import {
   View,
 } from 'react-native';
 import { scanSmartScores, SmartScoreResult } from '../services/smartScore';
+import {
+  loadMarketScopeConfig,
+  MarketScope,
+  saveMarketScopeConfig,
+  TOP_SAFE_SYMBOLS,
+} from '../services/marketScope';
+import {
+  disableBackgroundMarketMonitor,
+  enableBackgroundMarketMonitor,
+  getBackgroundMonitorConfig,
+} from '../services/backgroundMarketMonitor';
 
 interface Props {
   onUseSymbol: (symbol: string) => void;
 }
 
 const pct = (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+const parseCustomSymbols = (value: string) => value
+  .split(/[\s,;]+/)
+  .map((item) => item.trim().toUpperCase())
+  .filter(Boolean)
+  .map((item) => item.endsWith('USDT') ? item : `${item}USDT`);
 
 export const SmartScoreScreen: React.FC<Props> = ({ onUseSymbol }) => {
   const [results, setResults] = useState<SmartScoreResult[]>([]);
@@ -25,16 +41,21 @@ export const SmartScoreScreen: React.FC<Props> = ({ onUseSymbol }) => {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [minScoreText, setMinScoreText] = useState('70');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [scope, setScope] = useState<MarketScope>('safe');
+  const [customText, setCustomText] = useState('BTC, ETH, SOL, XRP');
+  const [backgroundEnabled, setBackgroundEnabled] = useState(false);
+  const [backgroundBusy, setBackgroundBusy] = useState(false);
   const mountedRef = useRef(true);
 
   const minScore = Math.max(0, Math.min(100, Number(minScoreText.replace(',', '.')) || 0));
+  const customSymbols = parseCustomSymbols(customText);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (loading) return;
     setLoading(true);
     setError('');
     try {
-      const rows = await scanSmartScores(12);
+      const rows = await scanSmartScores({ limit: 12, scope, customSymbols });
       if (!mountedRef.current) return;
       setResults(rows);
       setLastUpdated(new Date());
@@ -44,19 +65,59 @@ export const SmartScoreScreen: React.FC<Props> = ({ onUseSymbol }) => {
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  };
+  }, [customText, loading, scope]);
 
   useEffect(() => {
     mountedRef.current = true;
-    void refresh();
+    void (async () => {
+      const marketConfig = await loadMarketScopeConfig();
+      if (!mountedRef.current) return;
+      setScope(marketConfig.scope);
+      if (marketConfig.customSymbols.length) setCustomText(marketConfig.customSymbols.map((item) => item.replace(/USDT$/, '')).join(', '));
+      const backgroundConfig = await getBackgroundMonitorConfig();
+      if (mountedRef.current) setBackgroundEnabled(backgroundConfig.enabled);
+    })();
     return () => { mountedRef.current = false; };
   }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [scope]);
 
   useEffect(() => {
     if (!autoRefresh) return;
     const timer = setInterval(() => void refresh(), 60000);
     return () => clearInterval(timer);
-  }, [autoRefresh, loading]);
+  }, [autoRefresh, refresh]);
+
+  const changeScope = async (next: MarketScope) => {
+    setScope(next);
+    await saveMarketScopeConfig({ scope: next, customSymbols });
+  };
+
+  const saveCustom = async () => {
+    const saved = await saveMarketScopeConfig({ scope: 'custom', customSymbols });
+    setScope('custom');
+    setCustomText(saved.customSymbols.map((item) => item.replace(/USDT$/, '')).join(', '));
+    setError('');
+    void refresh();
+  };
+
+  const toggleBackground = async (enabled: boolean) => {
+    if (backgroundBusy) return;
+    setBackgroundBusy(true);
+    setError('');
+    try {
+      await saveMarketScopeConfig({ scope, customSymbols });
+      if (enabled) await enableBackgroundMarketMonitor(Math.max(70, minScore));
+      else await disableBackgroundMarketMonitor();
+      setBackgroundEnabled(enabled);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Nie udało się zmienić monitora w tle.');
+    } finally {
+      setBackgroundBusy(false);
+    }
+  };
 
   const filtered = results.filter((item) => item.score >= minScore);
 
@@ -74,25 +135,43 @@ export const SmartScoreScreen: React.FC<Props> = ({ onUseSymbol }) => {
         </View>
 
         <View style={styles.controlsCard}>
+          <Text style={styles.label}>Zakres rynku</Text>
+          <Text style={styles.hint}>TOP SAFE jest domyślny. FULL MARKET obejmuje wszystkie płynne pary. CUSTOM pozwala wskazać własne.</Text>
+          <View style={styles.scopeRow}>
+            <TouchableOpacity onPress={() => void changeScope('safe')} style={[styles.scopeButton, scope === 'safe' && styles.scopeSelected]}><Text style={styles.scopeText}>TOP SAFE</Text></TouchableOpacity>
+            <TouchableOpacity onPress={() => void changeScope('full')} style={[styles.scopeButton, scope === 'full' && styles.scopeSelected]}><Text style={styles.scopeText}>FULL MARKET</Text></TouchableOpacity>
+            <TouchableOpacity onPress={() => void changeScope('custom')} style={[styles.scopeButton, scope === 'custom' && styles.scopeSelected]}><Text style={styles.scopeText}>CUSTOM</Text></TouchableOpacity>
+          </View>
+          {scope === 'safe' && <Text style={styles.safeList}>SAFE: {TOP_SAFE_SYMBOLS.map((item) => item.replace(/USDT$/, '')).join(' • ')}</Text>}
+          {scope === 'custom' && <>
+            <TextInput value={customText} onChangeText={setCustomText} placeholder="BTC, ETH, SOL, XRP" placeholderTextColor="#666" style={styles.customInput} />
+            <TouchableOpacity onPress={() => void saveCustom()} style={styles.customSave}><Text style={styles.customSaveText}>ZAPISZ WŁASNĄ LISTĘ</Text></TouchableOpacity>
+          </>}
+
+          <View style={styles.separator} />
+
           <View style={styles.controlRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.label}>Minimalny score</Text>
               <Text style={styles.hint}>70 = DOBRY, 80 = MOCNY</Text>
             </View>
-            <TextInput
-              value={minScoreText}
-              onChangeText={setMinScoreText}
-              keyboardType="number-pad"
-              style={styles.scoreInput}
-            />
+            <TextInput value={minScoreText} onChangeText={setMinScoreText} keyboardType="number-pad" style={styles.scoreInput} />
           </View>
 
           <View style={styles.controlRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.label}>Auto-skan co 60 s</Text>
-              <Text style={styles.hint}>Odświeża ranking bez ręcznego naciskania.</Text>
+              <Text style={styles.hint}>Odświeża ranking, gdy aplikacja jest otwarta.</Text>
             </View>
             <Switch value={autoRefresh} onValueChange={setAutoRefresh} />
+          </View>
+
+          <View style={styles.controlRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.label}>Monitor w tle</Text>
+              <Text style={styles.hint}>Android okresowo skanuje rynek i wysyła powiadomienie o mocnym sygnale. System telefonu ustala faktyczną częstotliwość. Nie wykonuje zleceń w tle.</Text>
+            </View>
+            <Switch disabled={backgroundBusy} value={backgroundEnabled} onValueChange={(value) => void toggleBackground(value)} />
           </View>
 
           <TouchableOpacity disabled={loading} onPress={() => void refresh()} style={[styles.scanButton, loading && { opacity: 0.6 }]}>
@@ -112,14 +191,8 @@ export const SmartScoreScreen: React.FC<Props> = ({ onUseSymbol }) => {
         {filtered.map((item, index) => (
           <View key={item.symbol} style={styles.resultCard}>
             <View style={styles.resultTop}>
-              <View>
-                <Text style={styles.rank}>#{index + 1}</Text>
-                <Text style={styles.symbol}>{item.symbol}</Text>
-              </View>
-              <View style={styles.scoreBox}>
-                <Text style={styles.score}>{item.score}</Text>
-                <Text style={styles.scoreLabel}>{item.label}</Text>
-              </View>
+              <View><Text style={styles.rank}>#{index + 1}</Text><Text style={styles.symbol}>{item.symbol}</Text></View>
+              <View style={styles.scoreBox}><Text style={styles.score}>{item.score}</Text><Text style={styles.scoreLabel}>{item.label}</Text></View>
             </View>
 
             <View style={styles.metricsGrid}>
@@ -140,10 +213,7 @@ export const SmartScoreScreen: React.FC<Props> = ({ onUseSymbol }) => {
         ))}
 
         {!loading && results.length > 0 && filtered.length === 0 && (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>Brak sygnału powyżej progu</Text>
-            <Text style={styles.emptyText}>To jest poprawny wynik — lepiej czekać niż wymuszać wejście.</Text>
-          </View>
+          <View style={styles.emptyCard}><Text style={styles.emptyTitle}>Brak sygnału powyżej progu</Text><Text style={styles.emptyText}>To jest poprawny wynik — lepiej czekać niż wymuszać wejście.</Text></View>
         )}
       </ScrollView>
     </SafeAreaView>
@@ -161,7 +231,16 @@ const styles = StyleSheet.create({
   controlsCard: { backgroundColor: '#1B1B1B', borderRadius: 14, padding: 14, borderWidth: 1, borderColor: '#333' },
   controlRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
   label: { color: '#FFFFFF', fontWeight: '800', fontSize: 13 },
-  hint: { color: '#8E8E93', fontSize: 10, marginTop: 3 },
+  hint: { color: '#8E8E93', fontSize: 10, marginTop: 3, lineHeight: 14 },
+  scopeRow: { flexDirection: 'row', gap: 7, marginTop: 10, marginBottom: 8 },
+  scopeButton: { flex: 1, borderWidth: 1, borderColor: '#3F3F46', backgroundColor: '#242424', borderRadius: 9, paddingVertical: 10, alignItems: 'center' },
+  scopeSelected: { borderColor: '#F0B90B', backgroundColor: '#302A12' },
+  scopeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
+  safeList: { color: '#A1A1AA', fontSize: 9, lineHeight: 14, marginBottom: 6 },
+  customInput: { backgroundColor: '#242424', color: '#FFFFFF', borderRadius: 8, padding: 10, marginTop: 4, borderWidth: 1, borderColor: '#333' },
+  customSave: { marginTop: 7, borderWidth: 1, borderColor: '#F0B90B', borderRadius: 8, padding: 9, alignItems: 'center' },
+  customSaveText: { color: '#F0B90B', fontSize: 10, fontWeight: '900' },
+  separator: { height: StyleSheet.hairlineWidth, backgroundColor: '#3A3A3A', marginVertical: 13 },
   scoreInput: { width: 72, backgroundColor: '#242424', color: '#FFFFFF', borderRadius: 8, padding: 10, textAlign: 'center', fontWeight: '800' },
   scanButton: { backgroundColor: '#F0B90B', borderRadius: 10, padding: 13, alignItems: 'center' },
   scanButtonText: { color: '#111', fontWeight: '900' },

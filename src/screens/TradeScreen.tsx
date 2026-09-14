@@ -205,6 +205,74 @@ export const TradeScreen: React.FC<Props> = ({
     );
   };
 
+  const sellMax = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const baseCoin = symbol.replace(/USDT$/, '');
+      const wallet = await fetchWalletBalance(credentials);
+      const coin = wallet?.coin?.find((item) => item.coin === baseCoin);
+      const free = Number(coin?.free || 0);
+      const withdrawable = Number(coin?.availableToWithdraw || 0);
+      const walletBalance = Number(coin?.walletBalance || 0);
+      const locked = Number(coin?.locked || 0);
+      const fallbackAvailable = Math.max(0, walletBalance - Math.max(0, locked));
+      const qty = free > 0 ? free : withdrawable > 0 ? withdrawable : fallbackAvailable;
+
+      if (!Number.isFinite(qty) || qty <= 0) {
+        setError(`Brak dostępnego salda ${baseCoin} do sprzedaży.`);
+        setBusy(false);
+        return;
+      }
+
+      const executablePrice = market ? (market.bid > 0 ? market.bid : market.lastPrice) : 0;
+      const approxUsdt = executablePrice > 0 ? qty * executablePrice : 0;
+      setBusy(false);
+
+      Alert.alert(
+        'SELL MAX — sprzedaż całego salda',
+        `Sprzedać całe dostępne saldo ${baseCoin}: ${qty.toPrecision(8)} ${baseCoin}${approxUsdt > 0 ? ` (około ${approxUsdt.toFixed(2)} USDT)` : ''}?`,
+        [
+          { text: 'Anuluj', style: 'cancel' },
+          {
+            text: 'SPRZEDAJ CAŁOŚĆ',
+            style: 'destructive',
+            onPress: async () => {
+              setBusy(true);
+              setError('');
+              const startedAt = Date.now();
+              try {
+                const ack = await placeSpotMarketSellBase(credentials, symbol, qty);
+                const fill = await waitForSpotFill(credentials, ack.orderId);
+                setLastAck({
+                  ...ack,
+                  requestLatencyMs: Date.now() - startedAt,
+                  symbol,
+                  side: 'Sell',
+                  quoteAmountUsdt: fill.quoteValue,
+                });
+
+                livePositionsRef.current = livePositionsRef.current.filter((item) => item.symbol !== symbol);
+                setLivePositions([...livePositionsRef.current]);
+                if (initialHolding?.symbol === symbol) onHoldingConsumed?.();
+                setSmartStatus(`SELL MAX ${symbol}: sprzedano ${fill.baseQty} ${baseCoin} za ${fill.quoteValue.toFixed(2)} USDT.`);
+                await refreshAvailableUsdt();
+              } catch (e: unknown) {
+                setError(e instanceof Error ? e.message : 'Błąd sprzedaży MAX.');
+              } finally {
+                setBusy(false);
+              }
+            },
+          },
+        ]
+      );
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Nie udało się pobrać salda aktywa.');
+      setBusy(false);
+    }
+  };
+
   const stopSmart = () => {
     stopRef.current = true;
     setSmartStatus('STOP: kończę skanowanie. Otwarte pozycje LIVE pozostają bez zmian.');
@@ -564,6 +632,9 @@ export const TradeScreen: React.FC<Props> = ({
           <TouchableOpacity disabled={busy} style={[styles.button, styles.buy]} onPress={() => submit('Buy')}><Text style={styles.buttonText}>BUY</Text></TouchableOpacity>
           <TouchableOpacity disabled={busy} style={[styles.button, styles.sell]} onPress={() => submit('Sell')}><Text style={styles.buttonText}>SELL</Text></TouchableOpacity>
         </View>
+        <TouchableOpacity disabled={busy} style={[styles.maxSellButton, busy && { opacity: 0.6 }]} onPress={() => void sellMax()}>
+          <Text style={styles.maxSellText}>SELL MAX — SPRZEDAJ CAŁE SALDO {symbol.replace(/USDT$/, '')}</Text>
+        </TouchableOpacity>
 
         <View style={styles.smartCard}>
           <View style={styles.smartHeader}>
@@ -668,6 +739,8 @@ const styles = StyleSheet.create({
   buy: { backgroundColor: '#15803D' },
   sell: { backgroundColor: '#B91C1C' },
   buttonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
+  maxSellButton: { minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: '#EF4444', backgroundColor: '#2A1717', alignItems: 'center', justifyContent: 'center', marginTop: 10, paddingHorizontal: 10 },
+  maxSellText: { color: '#FF6B6B', fontSize: 12, fontWeight: '900', textAlign: 'center' },
   smartCard: { backgroundColor: '#191919', borderWidth: 1, borderColor: '#F0B90B', borderRadius: 14, padding: 15, marginTop: 22 },
   smartHeader: { flexDirection: 'row', alignItems: 'center' },
   smartTitle: { color: '#F0B90B', fontSize: 18, fontWeight: '900' },

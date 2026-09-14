@@ -1,3 +1,5 @@
+import { filterSymbolsByScope, MarketScope } from './marketScope';
+
 const BYBIT_BASE_URL = 'https://api.bybit.com';
 
 export type ScoreInterval = '1' | '5' | '15';
@@ -52,6 +54,12 @@ export interface SmartScoreResult {
   suggestedTrailArmPct: number;
   suggestedTrailDropPct: number;
   reasons: string[];
+}
+
+export interface SmartScoreScanOptions {
+  limit?: number;
+  scope?: MarketScope;
+  customSymbols?: string[];
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -147,8 +155,6 @@ async function analyzeTicker(ticker: TickerRow): Promise<SmartScoreResult | null
   const allNegative = momentum1mPct < 0 && momentum5mPct < 0 && momentum15mPct < 0;
   if (allPositive) score += 8;
   if (allNegative) score -= 10;
-
-  // Nie gonimy świecy po gwałtownym wybiciu: wysoki score ma oznaczać także rozsądny moment wejścia.
   if (momentum1mPct > 1.2) score -= clamp((momentum1mPct - 1.2) * 12, 0, 14);
   if (momentum5mPct > 3.5) score -= clamp((momentum5mPct - 3.5) * 5, 0, 10);
 
@@ -172,15 +178,24 @@ async function analyzeTicker(ticker: TickerRow): Promise<SmartScoreResult | null
   };
 }
 
-export async function scanSmartScores(limit = 12): Promise<SmartScoreResult[]> {
+export async function scanSmartScores(input: number | SmartScoreScanOptions = 12): Promise<SmartScoreResult[]> {
+  const options: SmartScoreScanOptions = typeof input === 'number' ? { limit: input } : input;
+  const limit = Math.max(5, Math.min(20, options.limit || 12));
+  const scope: MarketScope = options.scope || 'safe';
+  const customSymbols = options.customSymbols || [];
+
   const result = await publicGet<TickerResult>('/v5/market/tickers', { category: 'spot' });
   const stablePrefixes = ['USDC', 'USDE', 'DAI', 'FDUSD', 'TUSD', 'USDP', 'PYUSD'];
-  const shortlist = (result.list || [])
-    .filter((row) => row.symbol.endsWith('USDT') && !stablePrefixes.some((coin) => row.symbol.startsWith(coin)))
+  const scopedRows = filterSymbolsByScope(
+    (result.list || []).filter((row) => row.symbol.endsWith('USDT') && !stablePrefixes.some((coin) => row.symbol.startsWith(coin))),
+    { scope, customSymbols }
+  );
+
+  const shortlist = scopedRows
     .map((row) => ({ row, turnover: Number(row.turnover24h || 0), last: Number(row.lastPrice), bid: Number(row.bid1Price || 0), ask: Number(row.ask1Price || 0) }))
     .filter((item) => item.turnover >= 500000 && item.last > 0 && item.bid > 0 && item.ask > 0 && ((item.ask - item.bid) / item.last) * 100 <= 0.35)
     .sort((a, b) => b.turnover - a.turnover)
-    .slice(0, Math.max(5, Math.min(20, limit)));
+    .slice(0, limit);
 
   const output: SmartScoreResult[] = [];
   for (let i = 0; i < shortlist.length; i += 4) {
