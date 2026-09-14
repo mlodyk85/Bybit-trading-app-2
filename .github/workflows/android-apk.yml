@@ -10,9 +10,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
 
     steps:
       - name: Checkout repository
@@ -51,13 +56,14 @@ jobs:
         run: npx expo prebuild --platform android --no-install --clean
 
       - name: Build standalone Release APK with bundled JS
+        timeout-minutes: 35
         env:
           NODE_ENV: production
           GRADLE_OPTS: '-Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"'
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Verify release APK exists
         run: |
