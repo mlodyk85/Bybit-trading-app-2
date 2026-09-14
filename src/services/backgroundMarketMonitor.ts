@@ -33,8 +33,8 @@ async function readConfig(): Promise<BackgroundMonitorConfig> {
 async function notifyCandidate(symbol: string, score: number, details: string) {
   await Notifications.scheduleNotificationAsync({
     content: {
-      title: `SMART SCORE ${score}: ${symbol}`,
-      body: details,
+      title: `SMART AUTO ${score}: ${symbol}`,
+      body: `${details} • Otwórz aplikację, aby sprawdzić sygnał.`,
       sound: 'default',
     },
     trigger: null,
@@ -48,7 +48,7 @@ if (!TaskManager.isTaskDefined(TASK_NAME)) {
       if (!config.enabled) return BackgroundFetch.BackgroundFetchResult.NoData;
 
       const marketConfig: MarketScopeConfig = await loadMarketScopeConfig();
-      const rows = await scanSmartScores({ limit: 10, scope: marketConfig.scope, customSymbols: marketConfig.customSymbols });
+      const rows = await scanSmartScores({ limit: 12, scope: marketConfig.scope, customSymbols: marketConfig.customSymbols });
       const best = rows[0];
       if (!best || best.score < config.minScore) return BackgroundFetch.BackgroundFetchResult.NoData;
 
@@ -74,19 +74,19 @@ export async function enableBackgroundMarketMonitor(minScore = 80): Promise<void
   if (!permission.granted) throw new Error('Brak zgody na powiadomienia.');
 
   await Notifications.setNotificationChannelAsync(ANDROID_CHANNEL, {
-    name: 'Smart Market Monitor',
-    importance: Notifications.AndroidImportance.DEFAULT,
+    name: 'Smart Auto — monitor rynku',
+    importance: Notifications.AndroidImportance.HIGH,
   });
 
   await SecureStore.setItemAsync(CONFIG_KEY, JSON.stringify({ enabled: true, minScore: score }));
   const registered = await TaskManager.isTaskRegisteredAsync(TASK_NAME);
-  if (!registered) {
-    await BackgroundFetch.registerTaskAsync(TASK_NAME, {
-      minimumInterval: 5 * 60,
-      stopOnTerminate: false,
-      startOnBoot: true,
-    });
-  }
+  if (registered) await BackgroundFetch.unregisterTaskAsync(TASK_NAME);
+
+  await BackgroundFetch.registerTaskAsync(TASK_NAME, {
+    minimumInterval: 60,
+    stopOnTerminate: false,
+    startOnBoot: true,
+  });
 }
 
 export async function disableBackgroundMarketMonitor(): Promise<void> {
