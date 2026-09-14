@@ -458,7 +458,7 @@ export const TradeScreen: React.FC<Props> = ({
     if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
-    if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Maksymalna liczba cykli: 1–1000.');
+    if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Minimalna liczba cykli: 1–1000.');
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < trade)) return setError('Kapitał SHADOW musi wystarczyć co najmniej na jedną transakcję.');
 
     stopRef.current = false;
@@ -526,9 +526,13 @@ export const TradeScreen: React.FC<Props> = ({
             setCycleCount(cycleCountRef.current);
             setSessionProfit(sessionProfitRef.current);
 
-            if (cycleCountRef.current >= cycles) break;
+            if (cycleCountRef.current >= cycles && sessionProfitRef.current >= 0) break;
             if (target > 0 && sessionProfitRef.current >= target) break;
             if (sessionProfitRef.current <= -loss) break;
+
+            if (cycleCountRef.current >= cycles && sessionProfitRef.current < 0) {
+              setSmartStatus(`ZERO LOSS: min. ${cycles} cykli wykonane, ale PnL ${sessionProfitRef.current.toFixed(4)} USDT. Pracuję dalej do >= 0 lub limitu straty.`);
+            }
 
             if (refreshed.length < slots && shadowUsdtRef.current >= trade) {
               const candidate = await scanBestCandidate();
@@ -593,7 +597,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       setSmartRunning(false);
       stopRef.current = false;
-      if (cycleCountRef.current >= cycles) setSmartStatus(`Koniec limitu ${cycles} cykli.`);
+      if (cycleCountRef.current >= cycles && sessionProfitRef.current >= 0) setSmartStatus(`Min. ${cycles} cykli wykonane i ZERO LOSS osiągnięte: ${sessionProfitRef.current >= 0 ? '+' : ''}${sessionProfitRef.current.toFixed(4)} USDT.`);
       else if (target > 0 && sessionProfitRef.current >= target) setSmartStatus(`Cel sesji osiągnięty: +${sessionProfitRef.current.toFixed(4)} USDT.`);
       else if (sessionProfitRef.current <= -loss) setSmartStatus(`Max strata sesji: ${sessionProfitRef.current.toFixed(4)} USDT.`);
       else setSmartStatus('Skaner zatrzymany ręcznie.');
@@ -658,7 +662,7 @@ export const TradeScreen: React.FC<Props> = ({
               <View style={styles.field}><Text style={styles.smallLabel}>Max strata sesji</Text><TextInput value={maxLoss} onChangeText={setMaxLoss} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></View>
             </View>
             <View style={styles.grid}>
-              <View style={styles.field}><Text style={styles.smallLabel}>Maks. cykli</Text><TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
+              <View style={styles.field}><Text style={styles.smallLabel}>Min. cykli / ZERO LOSS</Text><TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
               <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty 1–5</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
             </View>
             {smartMode === 'shadow' ? (
