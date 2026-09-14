@@ -2,26 +2,23 @@ name: Apply v1.4.1 fixes
 
 on:
   push:
-    branches:
-      - feature/smart-auto-quality-background-v1.4.0
+    branches: [feature/smart-auto-quality-background-v1.4.0]
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           ref: feature/smart-auto-quality-background-v1.4.0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - name: Apply targeted repairs
+        shell: bash
         run: |
-          python - <<'PY'
+          python3 <<'PY'
           from pathlib import Path
           import json
 
@@ -40,7 +37,7 @@ jobs:
 
           start = text.index("  const confirmAssistSell = (position: TrackedPosition) => {")
           end = text.index("  const startSmart = () => {", start)
-          replacement = '''  const executeAssistSell = async (position: TrackedPosition) => {
+          replacement = """  const executeAssistSell = async (position: TrackedPosition) => {
     if (sellBusyRef.current || busy) return;
     if (!position.sellReady || position.currentPnlUsdt <= 0) {
       setError('SMART AUTO nie wystawia SELL na stracie. Pozycja pozostaje w monitoringu.');
@@ -77,46 +74,37 @@ jobs:
     }
   };
 
-'''
+"""
           text = text[:start] + replacement + text[end:]
 
           old = "    if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);\n"
           assert old in text
           text = text.replace(old, old + "    if (trade < SMART_MIN_TRADE_USDT) return setError(`SMART AUTO i DEMO wymagają minimum ${SMART_MIN_TRADE_USDT} USDT na jedną pozycję.`);\n", 1)
 
-          replacements = {
-              'SHADOW wykonuje tę samą strategię symulacyjnie. Realny BUY/SELL nadal wymaga potwierdzenia.': 'DEMO wykonuje tę samą strategię symulacyjnie i nie wysyła zleceń do Bybit. Realny BUY wymaga potwierdzenia, a SELL READY wykonujesz jednym kliknięciem.',
-              '<Text style={styles.modeText}>SHADOW</Text>': '<Text style={styles.modeText}>DEMO</Text>',
-              'Kapitał SHADOW (min. 10 USDT)': 'Kapitał DEMO (min. 10 USDT)',
-              "return setError('Kapitał SHADOW: minimum 10 USDT i co najmniej wartość jednej transakcji.');": "return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');",
-              'SHADOW SELL': 'DEMO SELL',
-              'SHADOW BUY': 'DEMO BUY',
-              'SHADOW: monitoruję': 'DEMO: monitoruję',
-              "'START SHADOW'": "'START DEMO'",
-              'onPress={() => confirmAssistSell(position)}': 'onPress={() => void executeAssistSell(position)}',
-          }
-          for a, b in replacements.items():
-              assert a in text, a
-              text = text.replace(a, b)
-
+          replacements = [
+              ('SHADOW wykonuje tę samą strategię symulacyjnie. Realny BUY/SELL nadal wymaga potwierdzenia.', 'DEMO wykonuje tę samą strategię symulacyjnie i nie wysyła zleceń do Bybit. Realny BUY wymaga potwierdzenia, a SELL READY wykonujesz jednym kliknięciem.'),
+              ('<Text style={styles.modeText}>SHADOW</Text>', '<Text style={styles.modeText}>DEMO</Text>'),
+              ('Kapitał SHADOW (min. 10 USDT)', 'Kapitał DEMO (min. 10 USDT)'),
+              ("return setError('Kapitał SHADOW: minimum 10 USDT i co najmniej wartość jednej transakcji.');", "return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');"),
+              ('SHADOW SELL', 'DEMO SELL'),
+              ('SHADOW BUY', 'DEMO BUY'),
+              ('SHADOW: monitoruję', 'DEMO: monitoruję'),
+              ("'START SHADOW'", "'START DEMO'"),
+              ('onPress={() => confirmAssistSell(position)}', 'onPress={() => void executeAssistSell(position)}'),
+          ]
+          for old_text, new_text in replacements:
+              assert old_text in text, old_text
+              text = text.replace(old_text, new_text)
           trade_path.write_text(text)
 
           api_path = Path('src/api/bybit.ts')
           api = api_path.read_text()
-          old = '''    basePrecision?: string;
-    minOrderQty?: string;
-    maxOrderQty?: string;
-'''
-          new = '''    basePrecision?: string;
-    qtyStep?: string;
-    minOrderQty?: string;
-    minOrderAmt?: string;
-    maxOrderQty?: string;
-'''
+          old = "    basePrecision?: string;\n    minOrderQty?: string;\n    maxOrderQty?: string;\n"
+          new = "    basePrecision?: string;\n    qtyStep?: string;\n    minOrderQty?: string;\n    minOrderAmt?: string;\n    maxOrderQty?: string;\n"
           assert old in api
           api = api.replace(old, new, 1)
 
-          old = '''  const instrument = await fetchSpotInstrument(symbol);
+          old = """  const instrument = await fetchSpotInstrument(symbol);
   const precision = Math.min(12, decimalPlaces(instrument.lotSizeFilter?.basePrecision));
   const factor = 10 ** precision;
   const baseQty = Math.floor(baseQtyInput * factor) / factor;
@@ -125,8 +113,8 @@ jobs:
     throw new BybitError('Ilość po zaokrągleniu jest mniejsza niż minimum Bybit.', 'MIN_QTY');
   }
 
-'''
-          new = '''  const instrument = await fetchSpotInstrument(symbol);
+"""
+          new = """  const instrument = await fetchSpotInstrument(symbol);
   const stepText = instrument.lotSizeFilter?.qtyStep || instrument.lotSizeFilter?.basePrecision || '0.00000001';
   const step = Number(stepText);
   const precision = Math.min(12, decimalPlaces(stepText));
@@ -148,7 +136,7 @@ jobs:
     }
   }
 
-'''
+"""
           assert old in api
           api = api.replace(old, new, 1)
           api_path.write_text(api)
@@ -166,15 +154,13 @@ jobs:
           app['expo']['android']['versionCode'] = 141
           app_path.write_text(json.dumps(app, ensure_ascii=False, indent=2) + '\n')
 
-          wf = Path('.github/workflows/fix-v141.yml')
-          if wf.exists():
-              wf.unlink()
+          Path('.github/workflows/fix-v141.yml').unlink()
           PY
-      - name: Commit repairs
+      - name: Commit fixes
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet && exit 0
           git commit -m "v1.4.1: one-tap SELL, DEMO labels and Bybit order guards"
           git push origin HEAD:feature/smart-auto-quality-background-v1.4.0
