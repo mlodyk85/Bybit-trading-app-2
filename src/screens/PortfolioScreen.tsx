@@ -50,15 +50,13 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
     try {
       setExecutions(await fetchSpotExecutions(credentials, 100));
     } catch {
-      // Portfolio nadal działa, nawet gdy historia Spot jest chwilowo niedostępna.
+      // Portfel nadal działa, nawet gdy historia Spot jest chwilowo niedostępna.
     } finally {
       setHistoryLoading(false);
     }
   }, [credentials]);
 
-  useEffect(() => {
-    void loadExecutions();
-  }, [loadExecutions]);
+  useEffect(() => { void loadExecutions(); }, [loadExecutions]);
 
   const refreshAll = () => {
     onRefresh();
@@ -72,53 +70,26 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
         keyExtractor={(item) => item.coin}
         renderItem={({ item }) => <AssetRow asset={item} executions={executions} onOpenTrade={onOpenSmartAuto} />}
         contentContainerStyle={styles.scrollContent}
-        refreshControl={
-          <RefreshControl
-            refreshing={isRefreshing || historyLoading}
-            onRefresh={refreshAll}
-            tintColor="#F0B90B"
-            colors={['#F0B90B']}
-          />
-        }
-        ListHeaderComponent={
-          <>
-            <View style={styles.headerRow}>
-              <Text style={styles.headerTitle}>Bybit Portfolio</Text>
-              <TouchableOpacity style={styles.refreshIconButton} onPress={refreshAll} disabled={isRefreshing || historyLoading}>
-                {isRefreshing || historyLoading ? <ActivityIndicator size="small" color="#F0B90B" /> : <Text style={styles.refreshIconText}>🔄 Odśwież</Text>}
-              </TouchableOpacity>
-            </View>
-
-            <ConnectionStatus state={connectionState} errorMessage={errorMessage} />
-            <AccountSummary account={account} />
-
-            <View style={styles.refreshControlBar}>
-              <Text style={styles.lastRefreshText}>Ostatnie odświeżenie: {formatTime(lastRefreshTime)}</Text>
-              <View style={styles.autoRefreshGroup}>
-                <Text style={styles.autoRefreshLabel}>Auto-refresh</Text>
-                <Switch
-                  value={autoRefreshEnabled}
-                  onValueChange={onToggleAutoRefresh}
-                  trackColor={{ false: '#333333', true: '#F0B90B' }}
-                  thumbColor={autoRefreshEnabled ? '#FFFFFF' : '#888888'}
-                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-                />
-              </View>
-            </View>
-
-            <View style={styles.infoBox}>
-              <Text style={styles.infoTitle}>Smart Auto z aktywów</Text>
-              <Text style={styles.infoText}>
-                Przy kryptowalucie z historią BUY możesz wejść bezpośrednio do Smart Auto. Bot najpierw zarządza tą pozycją według realnego PnL netto, a po sprzedaży wraca do USDT i szuka kolejnej płynnej pary.
-              </Text>
-            </View>
-
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Aktywa na koncie</Text>
-              <Text style={styles.sectionSubtitle}>{nonZeroAssets.length} {nonZeroAssets.length === 1 ? 'aktywum' : 'aktywów'}</Text>
-            </View>
-          </>
-        }
+        refreshControl={<RefreshControl refreshing={isRefreshing || historyLoading} onRefresh={refreshAll} tintColor="#F0B90B" colors={['#F0B90B']} />}
+        ListHeaderComponent={<>
+          <View style={styles.headerRow}>
+            <Text style={styles.headerTitle}>Portfel</Text>
+            <TouchableOpacity style={styles.refreshIconButton} onPress={refreshAll} disabled={isRefreshing || historyLoading}>
+              {isRefreshing || historyLoading ? <ActivityIndicator size="small" color="#F0B90B" /> : <Text style={styles.refreshIconText}>🔄 Odśwież</Text>}
+            </TouchableOpacity>
+          </View>
+          <ConnectionStatus state={connectionState} errorMessage={errorMessage} />
+          <AccountSummary account={account} />
+          <View style={styles.refreshControlBar}>
+            <Text style={styles.lastRefreshText}>Ostatnie odświeżenie: {formatTime(lastRefreshTime)}</Text>
+            <View style={styles.autoRefreshGroup}><Text style={styles.autoRefreshLabel}>Auto-refresh</Text><Switch value={autoRefreshEnabled} onValueChange={onToggleAutoRefresh} trackColor={{ false: '#333333', true: '#F0B90B' }} thumbColor={autoRefreshEnabled ? '#FFFFFF' : '#888888'} style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }} /></View>
+          </View>
+          <View style={styles.infoBox}>
+            <Text style={styles.infoTitle}>Smart Accumulate — każde aktywo</Text>
+            <Text style={styles.infoText}>Każdy coin z portfela może być zarządzany niezależnie. Bot operuje wyłącznie przypisaną partią aktywa; pozostałe saldo traktowane jest jako rezerwa i nie może być sprzedane przez tę operację.</Text>
+          </View>
+          <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Aktywa na koncie</Text><Text style={styles.sectionSubtitle}>{nonZeroAssets.length} {nonZeroAssets.length === 1 ? 'aktywum' : 'aktywów'}</Text></View>
+        </>}
         ListEmptyComponent={<View style={styles.emptyContainer}><Text style={styles.emptyText}>Brak aktywów z dodatnim saldem.</Text></View>}
       />
     </View>
