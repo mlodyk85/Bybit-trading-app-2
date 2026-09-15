@@ -2,30 +2,17 @@
   "expo": {
     "name": "Bybit Trading App",
     "slug": "bybit-trading-app",
-    "version": "1.4.2",
+    "version": "1.4.3",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "splash": {
-      "resizeMode": "contain",
-      "backgroundColor": "#121212"
-    },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
-    "ios": {
-      "supportsTablet": true,
-      "buildNumber": "142"
-    },
+    "splash": { "resizeMode": "contain", "backgroundColor": "#121212" },
+    "assetBundlePatterns": ["**/*"],
+    "ios": { "supportsTablet": true, "buildNumber": "143" },
     "android": {
-      "versionCode": 142,
-      "permissions": [
-        "REQUEST_INSTALL_PACKAGES"
-      ],
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#121212"
-      },
+      "versionCode": 143,
+      "permissions": ["REQUEST_INSTALL_PACKAGES"],
+      "adaptiveIcon": { "foregroundImage": "./assets/adaptive-icon.png", "backgroundColor": "#121212" },
       "package": "com.bybittradingapp.app"
     }
   }
