@@ -57,6 +57,15 @@ interface TrackedPosition {
   fromPortfolio?: boolean;
 }
 
+interface AccumulationCycle {
+  symbol: string;
+  soldQty: number;
+  soldQuoteUsdt: number;
+  sellPrice: number;
+  targetBuyPrice: number;
+  startedAt: number;
+}
+
 const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'SUIUSDT'];
 const CORE_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT']);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,6 +78,10 @@ const MAX_ENTRY_MOMENTUM_PCT = 2.5;
 const MAX_SPREAD_PCT = 0.20;
 const AUTO_SELL_PROFIT_PCT = 0.10;
 const SMART_MIN_TRADE_USDT = 10;
+const ACCUMULATION_MAX_SHARE = 0.25;
+const ACCUMULATION_MIN_PROFIT_PCT = 0.20;
+const ACCUMULATION_PEAK_PULLBACK_PCT = 0.06;
+const ACCUMULATION_REBUY_DROP_PCT = 0.20;
 
 export const TradeScreen: React.FC<Props> = ({
   credentials,
@@ -104,19 +117,21 @@ export const TradeScreen: React.FC<Props> = ({
   const [smartStatus, setSmartStatus] = useState('Gotowy');
   const [scanInfo, setScanInfo] = useState('');
   const [activeScore, setActiveScore] = useState<SmartCandidateScore | null>(null);
-  const [assistCandidate, setAssistCandidate] = useState<SmartCandidateScore | null>(null);
   const [shadowPositions, setShadowPositions] = useState<TrackedPosition[]>([]);
   const [livePositions, setLivePositions] = useState<TrackedPosition[]>([]);
+  const [accumulationCycle, setAccumulationCycle] = useState<AccumulationCycle | null>(null);
+  const [accumulatedCoin, setAccumulatedCoin] = useState(0);
 
   const stopRef = useRef(false);
   const scanCountRef = useRef(0);
   const shadowPositionsRef = useRef<TrackedPosition[]>([]);
   const livePositionsRef = useRef<TrackedPosition[]>([]);
-  const assistCandidateRef = useRef<SmartCandidateScore | null>(null);
   const shadowUsdtRef = useRef(25);
   const sessionProfitRef = useRef(0);
   const cycleCountRef = useRef(0);
   const sellBusyRef = useRef(false);
+  const accumulationRef = useRef<AccumulationCycle | null>(null);
+  const accumulatedCoinRef = useRef(0);
 
   useEffect(() => {
     if (!smartRunning && initialSymbol) setSymbol(initialSymbol.toUpperCase());
@@ -247,14 +262,7 @@ export const TradeScreen: React.FC<Props> = ({
               try {
                 const ack = await placeSpotMarketSellBase(credentials, symbol, qty);
                 const fill = await waitForSpotFill(credentials, ack.orderId);
-                setLastAck({
-                  ...ack,
-                  requestLatencyMs: Date.now() - startedAt,
-                  symbol,
-                  side: 'Sell',
-                  quoteAmountUsdt: fill.quoteValue,
-                });
-
+                setLastAck({ ...ack, requestLatencyMs: Date.now() - startedAt, symbol, side: 'Sell', quoteAmountUsdt: fill.quoteValue });
                 livePositionsRef.current = livePositionsRef.current.filter((item) => item.symbol !== symbol);
                 setLivePositions([...livePositionsRef.current]);
                 if (initialHolding?.symbol === symbol) onHoldingConsumed?.();
@@ -312,9 +320,7 @@ export const TradeScreen: React.FC<Props> = ({
       const windowMomentumPct = ((now.lastPrice - first.lastPrice) / first.lastPrice) * 100;
       const shortMomentumPct = ((now.lastPrice - shortBase.lastPrice) / shortBase.lastPrice) * 100;
 
-      if (!bestObserved || windowMomentumPct > bestObserved.momentum) {
-        bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
-      }
+      if (!bestObserved || windowMomentumPct > bestObserved.momentum) bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
 
       const isCore = CORE_SYMBOLS.has(now.symbol);
       if (windowMomentumPct < MIN_ENTRY_MOMENTUM_PCT || windowMomentumPct > MAX_ENTRY_MOMENTUM_PCT) continue;
@@ -347,13 +353,7 @@ export const TradeScreen: React.FC<Props> = ({
     const peakMovePct = Math.max(position.peakMovePct, movePct);
     const currentPnlUsdt = executablePrice * position.qty - position.costUsdt;
     const sellReady = movePct >= AUTO_SELL_PROFIT_PCT && currentPnlUsdt > 0;
-    return {
-      ...position,
-      peakMovePct,
-      currentMovePct: movePct,
-      currentPnlUsdt,
-      sellReady,
-    };
+    return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady };
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
@@ -366,7 +366,6 @@ export const TradeScreen: React.FC<Props> = ({
       const free = await refreshAvailableUsdt();
       if (free + 1e-8 < trade) {
         setSmartStatus(`Za mało wolnych USDT (${free.toFixed(2)}). Skaner działa dalej.`);
-        setError('Insufficient balance — skaner nie został zatrzymany.');
         return;
       }
       const ack = await placeSpotMarketOrder(credentials, candidate.market.symbol, 'Buy', trade, maxOrderUsdt);
@@ -387,8 +386,6 @@ export const TradeScreen: React.FC<Props> = ({
       };
       livePositionsRef.current = [...livePositionsRef.current, position];
       setLivePositions([...livePositionsRef.current]);
-      assistCandidateRef.current = null;
-      setAssistCandidate(null);
       setSmartStatus(`AUTO BUY ${position.symbol}: ${trade.toFixed(2)} USDT. AUTO SELL przy +${AUTO_SELL_PROFIT_PCT.toFixed(2)}%.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
@@ -401,7 +398,7 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const executeAssistSell = async (position: TrackedPosition) => {
-    if (sellBusyRef.current) return;
+    if (sellBusyRef.current || position.fromPortfolio) return;
     if (!position.sellReady || position.currentPnlUsdt <= 0) return;
 
     sellBusyRef.current = true;
@@ -417,17 +414,159 @@ export const TradeScreen: React.FC<Props> = ({
       sessionProfitRef.current += pnl;
       setCycleCount(cycleCountRef.current);
       setSessionProfit(sessionProfitRef.current);
-      if (position.fromPortfolio) onHoldingConsumed?.();
       setSmartStatus(`AUTO SELL ${position.symbol} • wynik ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} USDT. Skaner działa dalej.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd SELL.';
-      const lowerLimit = /lower limit|minimum|min order|minimal/i.test(message);
-      const shown = lowerLimit
-        ? 'Pozycja jest za mała dla minimalnej wartości zlecenia Bybit. Nie została sprzedana.'
-        : message;
-      setError(shown);
-      setSmartStatus(`AUTO SELL nieudany: ${shown} Skaner nadal monitoruje pozycję.`);
+      setError(message);
+      setSmartStatus(`AUTO SELL nieudany: ${message}. Skaner nadal monitoruje pozycję.`);
+    } finally {
+      sellBusyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const tryStartAccumulation = async (trade: number): Promise<boolean> => {
+    if (accumulationRef.current || sellBusyRef.current) return false;
+    const candidates = livePositionsRef.current
+      .filter((position) => position.fromPortfolio && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0)
+      .sort((a, b) => (b.currentMovePct - b.peakMovePct) - (a.currentMovePct - a.peakMovePct));
+
+    for (const position of candidates) {
+      const pullbackPct = position.peakMovePct - position.currentMovePct;
+      if (position.currentMovePct < ACCUMULATION_MIN_PROFIT_PCT || pullbackPct < ACCUMULATION_PEAK_PULLBACK_PCT) continue;
+
+      const snapshot = await fetchSpotMarketSnapshot(position.symbol);
+      const sellPrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
+      if (sellPrice <= 0) continue;
+
+      const maxByShare = position.qty * ACCUMULATION_MAX_SHARE;
+      const maxByTrade = trade / sellPrice;
+      const qty = Math.min(maxByShare, maxByTrade);
+      const estimatedQuote = qty * sellPrice;
+      if (qty <= 0 || estimatedQuote < SMART_MIN_TRADE_USDT) continue;
+
+      sellBusyRef.current = true;
+      setBusy(true);
+      setSmartStatus(`SMART ACCUMULATION: ${position.symbol} potwierdził lokalną górkę. Sprzedaję część roboczą...`);
+      try {
+        const ack = await placeSpotMarketSellBase(credentials, position.symbol, qty);
+        const fill = await waitForSpotFill(credentials, ack.orderId);
+        const soldQty = fill.baseQty > 0 ? fill.baseQty : qty;
+        const soldQuoteUsdt = fill.quoteValue;
+        const actualSellPrice = fill.avgPrice > 0 ? fill.avgPrice : soldQuoteUsdt / soldQty;
+        const soldCost = position.entryPrice * soldQty;
+        const realizedPnl = soldQuoteUsdt - soldCost;
+
+        const remainingQty = Math.max(0, position.qty - soldQty);
+        const remainingCost = Math.max(0, position.costUsdt - soldCost);
+        const updated = livePositionsRef.current.map((item) => item.id === position.id ? {
+          ...item,
+          qty: remainingQty,
+          costUsdt: remainingCost,
+          currentPnlUsdt: 0,
+          sellReady: false,
+        } : item);
+        livePositionsRef.current = updated;
+        setLivePositions([...updated]);
+
+        const cycle: AccumulationCycle = {
+          symbol: position.symbol,
+          soldQty,
+          soldQuoteUsdt,
+          sellPrice: actualSellPrice,
+          targetBuyPrice: actualSellPrice * (1 - ACCUMULATION_REBUY_DROP_PCT / 100),
+          startedAt: Date.now(),
+        };
+        accumulationRef.current = cycle;
+        setAccumulationCycle(cycle);
+        sessionProfitRef.current += Math.max(0, realizedPnl);
+        setSessionProfit(sessionProfitRef.current);
+        setSmartStatus(`SMART ACCUMULATION SELL ${position.symbol}: ${soldQty.toPrecision(7)} sprzedane po ${priceText(actualSellPrice)}. Czekam na odkup ≤ ${priceText(cycle.targetBuyPrice)}.`);
+        await refreshAvailableUsdt();
+        return true;
+      } finally {
+        sellBusyRef.current = false;
+        setBusy(false);
+      }
+    }
+    return false;
+  };
+
+  const tryFinishAccumulation = async (): Promise<boolean> => {
+    const cycle = accumulationRef.current;
+    if (!cycle || sellBusyRef.current) return false;
+
+    const first = await fetchSpotMarketSnapshot(cycle.symbol);
+    const firstAsk = first.ask > 0 ? first.ask : first.lastPrice;
+    if (firstAsk <= 0 || firstAsk > cycle.targetBuyPrice) {
+      setSmartStatus(`SMART ACCUMULATION ${cycle.symbol}: po SELL czekam na dołek. Teraz ${priceText(firstAsk)}, cel ≤ ${priceText(cycle.targetBuyPrice)}.`);
+      return false;
+    }
+
+    await sleep(1200);
+    const second = await fetchSpotMarketSnapshot(cycle.symbol);
+    const secondAsk = second.ask > 0 ? second.ask : second.lastPrice;
+    if (secondAsk <= 0 || secondAsk < firstAsk) {
+      setSmartStatus(`SMART ACCUMULATION ${cycle.symbol}: cena jest nisko, ale nadal spada. Czekam na potwierdzenie odbicia.`);
+      return false;
+    }
+
+    sellBusyRef.current = true;
+    setBusy(true);
+    try {
+      const spend = Math.min(cycle.soldQuoteUsdt, maxOrderUsdt);
+      const ack = await placeSpotMarketOrder(credentials, cycle.symbol, 'Buy', spend, maxOrderUsdt);
+      const fill = await waitForSpotFill(credentials, ack.orderId);
+      const baseCoin = cycle.symbol.replace(/USDT$/, '');
+      const boughtQty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
+      const extraCoin = boughtQty - cycle.soldQty;
+
+      const existing = livePositionsRef.current.find((item) => item.symbol === cycle.symbol && item.fromPortfolio);
+      if (existing) {
+        const nextQty = existing.qty + boughtQty;
+        const nextCost = existing.costUsdt + fill.quoteValue;
+        const nextEntry = nextQty > 0 ? nextCost / nextQty : existing.entryPrice;
+        livePositionsRef.current = livePositionsRef.current.map((item) => item.id === existing.id ? {
+          ...item,
+          qty: nextQty,
+          costUsdt: nextCost,
+          entryPrice: nextEntry,
+          peakMovePct: 0,
+          currentMovePct: 0,
+          currentPnlUsdt: 0,
+          sellReady: false,
+        } : item);
+      } else {
+        livePositionsRef.current = [...livePositionsRef.current, {
+          id: `acc-${cycle.symbol}-${Date.now()}`,
+          symbol: cycle.symbol,
+          qty: boughtQty,
+          costUsdt: fill.quoteValue,
+          entryPrice: fill.avgPrice,
+          peakMovePct: 0,
+          currentMovePct: 0,
+          currentPnlUsdt: 0,
+          sellReady: false,
+          fromPortfolio: true,
+        }];
+      }
+      setLivePositions([...livePositionsRef.current]);
+
+      accumulatedCoinRef.current += extraCoin;
+      setAccumulatedCoin(accumulatedCoinRef.current);
+      cycleCountRef.current += 1;
+      setCycleCount(cycleCountRef.current);
+      accumulationRef.current = null;
+      setAccumulationCycle(null);
+      setSmartStatus(`SMART ACCUMULATION BUY BACK ${cycle.symbol}: odkupiono ${boughtQty.toPrecision(7)}. Zmiana ilości coina w cyklu: ${extraCoin >= 0 ? '+' : ''}${extraCoin.toPrecision(5)}.`);
+      await refreshAvailableUsdt();
+      return true;
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Błąd BUY BACK.';
+      setError(message);
+      setSmartStatus(`SMART ACCUMULATION: BUY BACK nieudany (${message}). USDT pozostaje wolne, bot spróbuje ponownie.`);
+      return false;
     } finally {
       sellBusyRef.current = false;
       setBusy(false);
@@ -454,15 +593,17 @@ export const TradeScreen: React.FC<Props> = ({
     cycleCountRef.current = 0;
     sessionProfitRef.current = 0;
     shadowPositionsRef.current = [];
-    assistCandidateRef.current = null;
+    accumulationRef.current = null;
+    accumulatedCoinRef.current = 0;
+    setAccumulationCycle(null);
+    setAccumulatedCoin(0);
     setSmartRunning(true);
     setError('');
     setCycleCount(0);
     setScanCount(0);
     setSessionProfit(0);
     setActiveScore(null);
-    setAssistCandidate(null);
-    setScanInfo(`Start skanera • AUTO BUY od +${MIN_ENTRY_MOMENTUM_PCT.toFixed(2)}% • AUTO SELL przy +${AUTO_SELL_PROFIT_PCT.toFixed(2)}%`);
+    setScanInfo(`Start skanera • AUTO BUY od +${MIN_ENTRY_MOMENTUM_PCT.toFixed(2)}% • AUTO SELL przy +${AUTO_SELL_PROFIT_PCT.toFixed(2)}% • SMART ACCUMULATION przy braku USDT`);
 
     if (smartMode === 'shadow') {
       shadowUsdtRef.current = virtualCapital;
@@ -505,12 +646,8 @@ export const TradeScreen: React.FC<Props> = ({
                   sessionProfitRef.current += pnl;
                   cycleCountRef.current += 1;
                   setSmartStatus(`DEMO SELL ${updated.symbol} • +${pnl.toFixed(4)} USDT • szukam dalej.`);
-                } else {
-                  refreshed.push({ ...updated, sellReady: false });
-                }
-              } else {
-                refreshed.push(updated);
-              }
+                } else refreshed.push({ ...updated, sellReady: false });
+              } else refreshed.push(updated);
             }
             shadowPositionsRef.current = refreshed;
             setShadowPositions([...refreshed]);
@@ -551,16 +688,19 @@ export const TradeScreen: React.FC<Props> = ({
           } else {
             const refreshed: TrackedPosition[] = [];
             for (const position of livePositionsRef.current) {
-              try {
-                refreshed.push(await updateTrackedPosition(position));
-              } catch {
-                refreshed.push(position);
-              }
+              try { refreshed.push(await updateTrackedPosition(position)); }
+              catch { refreshed.push(position); }
             }
             livePositionsRef.current = refreshed;
             setLivePositions([...refreshed]);
 
-            const sellCandidate = refreshed.find((position) => position.sellReady && position.currentPnlUsdt > 0);
+            if (accumulationRef.current) {
+              await tryFinishAccumulation();
+              await sleep(900);
+              continue;
+            }
+
+            const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
             if (sellCandidate) {
               await executeAssistSell(sellCandidate);
               await sleep(500);
@@ -570,17 +710,19 @@ export const TradeScreen: React.FC<Props> = ({
             const free = await refreshAvailableUsdt();
             if (refreshed.length < slots && free + 1e-8 >= trade) {
               const candidate = await scanBestCandidate();
-              if (candidate && livePositionsRef.current.every((item) => item.symbol !== candidate.market.symbol)) {
-                assistCandidateRef.current = candidate;
-                setAssistCandidate(candidate);
-                await buyCandidate(candidate, trade, slots);
+              if (candidate && livePositionsRef.current.every((item) => item.symbol !== candidate.market.symbol)) await buyCandidate(candidate, trade, slots);
+            } else if (free + 1e-8 < trade) {
+              const started = await tryStartAccumulation(trade);
+              if (!started) {
+                const managed = refreshed.filter((item) => item.fromPortfolio).length;
+                setSmartStatus(managed > 0
+                  ? `SMART ACCUMULATION: USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Monitoruję ${managed} pozycję/pozycje i czekam na bezpieczną lokalną górkę.`
+                  : `SMART AUTO: USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Brak pozycji z wiarygodną ceną zakupu do bezpiecznej rotacji.`);
+                await sleep(1500);
               }
-            } else if (refreshed.length >= slots) {
-              setSmartStatus(`SMART AUTO: ${refreshed.length}/${slots} slotów zajętych. AUTO SELL przy +${AUTO_SELL_PROFIT_PCT.toFixed(2)}%.`);
-              await sleep(1000);
             } else {
-              setSmartStatus(`SMART AUTO: wolne USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Monitoruję istniejące pozycje.`);
-              await sleep(1800);
+              setSmartStatus(`SMART AUTO: ${refreshed.length}/${slots} slotów zajętych. Monitoruję pozycje.`);
+              await sleep(1000);
             }
           }
         } catch (e: unknown) {
@@ -640,13 +782,13 @@ export const TradeScreen: React.FC<Props> = ({
           <View style={styles.smartHeader}>
             <View style={{ flex: 1 }}>
               <Text style={styles.smartTitle}>SMART AUTO</Text>
-              <Text style={styles.smartSub}>AUTO BUY od +0,05% • AUTO SELL przy +0,10% • 1–3 pozycje</Text>
+              <Text style={styles.smartSub}>AUTO BUY • AUTO SELL • SMART ACCUMULATION przy braku USDT</Text>
             </View>
             <Switch value={smartEnabled} onValueChange={(value) => { if (!smartRunning) setSmartEnabled(value); }} disabled={smartRunning} />
           </View>
 
           {smartEnabled && <>
-            <Text style={styles.smartNotice}>SMART AUTO skanuje rynek i automatycznie kupuje po wykryciu ruchu od +{MIN_ENTRY_MOMENTUM_PCT.toFixed(2)}%. Po zakupie monitoruje faktyczną cenę wejścia i automatycznie sprzedaje po osiągnięciu +{AUTO_SELL_PROFIT_PCT.toFixed(2)}%, jeżeli pozycja ma dodatni PnL. DEMO wykonuje tę samą strategię bez wysyłania zleceń do Bybit.</Text>
+            <Text style={styles.smartNotice}>Gdy wystarcza USDT, bot korzysta z normalnego SMART AUTO. Gdy USDT jest za mało, SMART ACCUMULATION może sprzedać maks. 25% zarządzanej pozycji na potwierdzonym lokalnym szczycie i odkupić ją niżej po potwierdzeniu odbicia. Pozycje bez wiarygodnej ceny zakupu nie są automatycznie rotowane.</Text>
 
             <View style={styles.modeRow}>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>SMART AUTO</Text></TouchableOpacity>
@@ -663,9 +805,7 @@ export const TradeScreen: React.FC<Props> = ({
             </View>
             {smartMode === 'shadow' ? (
               <><Text style={styles.smallLabel}>Kapitał DEMO (min. 10 USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
-            ) : (
-              <Text style={styles.balanceText}>Wolne USDT: {availableUsdt.toFixed(2)}</Text>
-            )}
+            ) : <Text style={styles.balanceText}>Wolne USDT: {availableUsdt.toFixed(2)}</Text>}
 
             <View style={styles.stats}>
               <Text style={styles.stat}>Cykle: {cycleCount}</Text>
@@ -674,28 +814,28 @@ export const TradeScreen: React.FC<Props> = ({
               {smartMode === 'shadow' && <Text style={styles.stat}>USDT {shadowUsdt.toFixed(2)}</Text>}
             </View>
 
+            {smartMode === 'assist' && <View style={styles.accCard}>
+              <Text style={styles.accTitle}>SMART ACCUMULATION</Text>
+              <Text style={styles.accLine}>{accumulationCycle ? `${accumulationCycle.symbol}: po SELL, cel odkupu ${priceText(accumulationCycle.targetBuyPrice)}` : 'Gotowy — uruchamia się automatycznie, gdy brakuje USDT.'}</Text>
+              <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
+            </View>}
+
             {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
             {activeScore && <Text style={styles.candidate}>Kandydat: {activeScore.market.symbol} • +{activeScore.windowMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
             {positionsToRender.map((position) => {
               const state = position.currentPnlUsdt <= 0 ? 'CZEKA NA PLUS' : position.sellReady ? 'AUTO SELL READY' : 'NA PLUSIE';
-              return (
-                <View key={position.id} style={styles.positionCard}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.positionSymbol}>{position.symbol} • {state}</Text>
-                    <Text style={styles.positionLine}>wejście {priceText(position.entryPrice)} • ruch {position.currentMovePct >= 0 ? '+' : ''}{position.currentMovePct.toFixed(4)}%</Text>
-                    <Text style={styles.positionLine}>max +{Math.max(0, position.peakMovePct).toFixed(4)}% • PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
-                  </View>
-                </View>
-              );
+              return <View key={position.id} style={styles.positionCard}><View style={{ flex: 1 }}>
+                <Text style={styles.positionSymbol}>{position.symbol} • {position.fromPortfolio ? 'ACCUMULATION' : state}</Text>
+                <Text style={styles.positionLine}>wejście {priceText(position.entryPrice)} • ruch {position.currentMovePct >= 0 ? '+' : ''}{position.currentMovePct.toFixed(4)}%</Text>
+                <Text style={styles.positionLine}>max +{Math.max(0, position.peakMovePct).toFixed(4)}% • PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
+              </View></View>;
             })}
 
-            {smartRunning ? (
-              <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP SKANERA</Text></TouchableOpacity>
-            ) : (
-              <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START SMART AUTO' : 'START DEMO'}</Text></TouchableOpacity>
-            )}
+            {smartRunning
+              ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP SKANERA</Text></TouchableOpacity>
+              : <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START SMART AUTO' : 'START DEMO'}</Text></TouchableOpacity>}
           </>}
         </View>
 
@@ -755,17 +895,18 @@ const styles = StyleSheet.create({
   balanceText: { color: '#22C55E', fontSize: 12, fontWeight: '800', marginTop: 10 },
   stats: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 14 },
   stat: { color: '#FFFFFF', fontWeight: '700', fontSize: 11 },
+  accCard: { backgroundColor: '#20251A', borderWidth: 1, borderColor: '#65A30D', borderRadius: 10, padding: 10, marginTop: 12 },
+  accTitle: { color: '#A3E635', fontSize: 11, fontWeight: '900' },
+  accLine: { color: '#D4D4D8', fontSize: 10, lineHeight: 15, marginTop: 4 },
   scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
   candidate: { color: '#22C55E', fontSize: 11, lineHeight: 16, marginTop: 7 },
   status: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   smartButton: { backgroundColor: '#F0B90B', padding: 14, borderRadius: 10, alignItems: 'center' },
   smartButtonText: { color: '#111111', fontWeight: '900' },
   stopButton: { backgroundColor: '#B91C1C', padding: 14, borderRadius: 10, alignItems: 'center', marginTop: 10 },
-  confirmBuy: { backgroundColor: '#15803D', padding: 13, borderRadius: 10, alignItems: 'center', marginBottom: 10 },
   positionCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#222222', borderRadius: 10, padding: 10, marginBottom: 8 },
   positionSymbol: { color: '#FFFFFF', fontWeight: '900', fontSize: 13 },
   positionLine: { color: '#A1A1AA', fontSize: 10, marginTop: 3 },
-  sellReady: { backgroundColor: '#B91C1C', paddingHorizontal: 16, paddingVertical: 11, borderRadius: 8, marginLeft: 8 },
   card: { backgroundColor: '#1E1E1E', borderRadius: 14, padding: 15, marginTop: 18 },
   cardTitle: { color: '#FFFFFF', fontWeight: '800', marginBottom: 8 },
   line: { color: '#D4D4D8', marginTop: 4 },
