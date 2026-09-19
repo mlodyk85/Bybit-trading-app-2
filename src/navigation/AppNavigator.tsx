@@ -6,6 +6,7 @@ import { MAX_SPOT_ORDER_USDT } from '../api/bybit';
 import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { useBybitAccount } from '../hooks/useBybitAccount';
 import { PortfolioScreen } from '../screens/PortfolioScreen';
+import { AnalysisScreen } from '../screens/AnalysisScreen';
 import { PositionsScreen } from '../screens/PositionsScreen';
 import { ReportScreen } from '../screens/ReportScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
@@ -35,6 +36,7 @@ export const AppNavigator: React.FC = () => {
       </Tab.Screen>
       <Tab.Screen name="Positions" options={{ tabBarLabel: 'Pozycje', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>📈</Text> }}>{() => <PositionsScreen positions={positions} account={account} isRefreshing={isRefreshing} onRefresh={refresh} />}</Tab.Screen>
       <Tab.Screen name="Trade" options={{ tabBarLabel: 'Trade', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚡</Text> }}>{() => <TradeScreen credentials={credentials} initialSymbol={selectedTradeSymbol} initialHolding={smartSeed} maxOrderUsdt={maxOrderUsdt} onHoldingConsumed={() => setSmartSeed(null)} />}</Tab.Screen>
+      <Tab.Screen name="Analysis" options={{ tabBarLabel: 'Analiza', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🔎</Text> }}>{({ navigation }) => <AnalysisScreen onUseSymbol={(nextSymbol) => { setSelectedTradeSymbol(nextSymbol); setSmartSeed(null); navigation.navigate('Trade'); }} />}</Tab.Screen>
       <Tab.Screen name="Score" options={{ tabBarLabel: 'Score', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🎯</Text> }}>{({ navigation }) => <SmartScoreScreen onUseSymbol={(nextSymbol) => { setSelectedTradeSymbol(nextSymbol); setSmartSeed(null); navigation.navigate('Trade'); }} />}</Tab.Screen>
       <Tab.Screen name="Report" options={{ tabBarLabel: 'Raport', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🧾</Text> }}>{() => <ReportScreen credentials={credentials} />}</Tab.Screen>
       <Tab.Screen name="Settings" options={{ tabBarLabel: 'Ustaw.', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚙️</Text> }}>{() => <SettingsScreen credentials={credentials} connectionState={connectionState} autoRefreshInterval={autoRefreshInterval} maxOrderUsdt={maxOrderUsdt} onSetAutoRefreshInterval={setAutoRefreshInterval} onSetMaxOrderUsdt={updateMaxOrder} onUpdateCredentials={async (key, secret) => await connect(key, secret, true)} onTestConnection={testConnection} onDisconnect={disconnect} />}</Tab.Screen>
