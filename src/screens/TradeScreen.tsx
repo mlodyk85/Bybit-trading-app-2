@@ -78,7 +78,7 @@ const MAX_ENTRY_MOMENTUM_PCT = 2.5;
 const MAX_SPREAD_PCT = 0.20;
 const AUTO_SELL_PROFIT_PCT = 0.10;
 const SMART_MIN_TRADE_USDT = 10;
-const ACCUMULATION_MAX_SHARE = 0.25;
+const ACCUMULATION_DEFAULT_SHARE = 0.10;
 const ACCUMULATION_MIN_PROFIT_PCT = 0.20;
 const ACCUMULATION_PEAK_PULLBACK_PCT = 0.06;
 const ACCUMULATION_REBUY_DROP_PCT = 0.20;
@@ -121,6 +121,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [livePositions, setLivePositions] = useState<TrackedPosition[]>([]);
   const [accumulationCycle, setAccumulationCycle] = useState<AccumulationCycle | null>(null);
   const [accumulatedCoin, setAccumulatedCoin] = useState(0);
+  const [accumulationShare, setAccumulationShare] = useState('10');
 
   const stopRef = useRef(false);
   const scanCountRef = useRef(0);
@@ -186,7 +187,6 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const selectPair = (next: string) => {
-    if (smartRunning) return;
     setSymbol(next);
     setPairSearch('');
     setPairPickerOpen(false);
@@ -440,7 +440,8 @@ export const TradeScreen: React.FC<Props> = ({
       const sellPrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
       if (sellPrice <= 0) continue;
 
-      const maxByShare = position.qty * ACCUMULATION_MAX_SHARE;
+      const configuredShare = Math.min(1, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
+      const maxByShare = position.qty * configuredShare;
       const maxByTrade = trade / sellPrice;
       const qty = Math.min(maxByShare, maxByTrade);
       const estimatedQuote = qty * sellPrice;
@@ -762,7 +763,7 @@ export const TradeScreen: React.FC<Props> = ({
         </View>
 
         <Text style={styles.label}>Para ręcznego handlu</Text>
-        <TouchableOpacity style={styles.pairSelector} onPress={() => !smartRunning && setPairPickerOpen(true)}>
+        <TouchableOpacity style={styles.pairSelector} onPress={() => setPairPickerOpen(true)}>
           <View><Text style={styles.pairValue}>{symbol}</Text><Text style={styles.hint}>Dotknij, aby zmienić</Text></View>
           <Text style={styles.arrow}>⌄</Text>
         </TouchableOpacity>
@@ -788,7 +789,7 @@ export const TradeScreen: React.FC<Props> = ({
           </View>
 
           {smartEnabled && <>
-            <Text style={styles.smartNotice}>Gdy wystarcza USDT, bot korzysta z normalnego SMART AUTO. Gdy USDT jest za mało, SMART ACCUMULATION może sprzedać maks. 25% zarządzanej pozycji na potwierdzonym lokalnym szczycie i odkupić ją niżej po potwierdzeniu odbicia. Pozycje bez wiarygodnej ceny zakupu nie są automatycznie rotowane.</Text>
+            <Text style={styles.smartNotice}>Gdy wystarcza USDT, bot korzysta z normalnego SMART AUTO. SMART ACCUMULATION używa domyślnie 10% zarządzanego coina (wartość możesz zmienić ręcznie), sprzedaje część roboczą po potwierdzeniu lokalnej górki i odkupuje ją niżej po potwierdzeniu odbicia. SELL → BUY = 1 cykl akumulacji.</Text>
 
             <View style={styles.modeRow}>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>SMART AUTO</Text></TouchableOpacity>
@@ -816,6 +817,8 @@ export const TradeScreen: React.FC<Props> = ({
 
             {smartMode === 'assist' && <View style={styles.accCard}>
               <Text style={styles.accTitle}>SMART ACCUMULATION</Text>
+              <Text style={styles.smallLabel}>Kapitał roboczy coina (%) — domyślnie 10%</Text>
+              <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.accLine}>{accumulationCycle ? `${accumulationCycle.symbol}: po SELL, cel odkupu ${priceText(accumulationCycle.targetBuyPrice)}` : 'Gotowy — uruchamia się automatycznie, gdy brakuje USDT.'}</Text>
               <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
             </View>}
