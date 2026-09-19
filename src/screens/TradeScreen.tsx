@@ -120,7 +120,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [activeScore, setActiveScore] = useState<SmartCandidateScore | null>(null);
   const [shadowPositions, setShadowPositions] = useState<TrackedPosition[]>([]);
   const [livePositions, setLivePositions] = useState<TrackedPosition[]>([]);
-  const [accumulationCycle, setAccumulationCycle] = useState<AccumulationCycle | null>(null);
+  const [accumulationCycles, setAccumulationCycles] = useState<AccumulationCycle[]>([]);
   const [accumulatedCoin, setAccumulatedCoin] = useState(0);
   const [accumulationShare, setAccumulationShare] = useState('10');
 
@@ -132,7 +132,7 @@ export const TradeScreen: React.FC<Props> = ({
   const sessionProfitRef = useRef(0);
   const cycleCountRef = useRef(0);
   const sellBusyRef = useRef(false);
-  const accumulationRef = useRef<AccumulationCycle | null>(null);
+  const accumulationRef = useRef<Map<string, AccumulationCycle>>(new Map());
   const accumulatedCoinRef = useRef(0);
 
   useEffect(() => {
@@ -361,13 +361,15 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
-    if (!candidate || !smartRunning || smartMode !== 'assist') return;
+    if (!candidate || stopRef.current || smartMode !== 'assist') return;
     if (livePositionsRef.current.length >= slots) return;
 
     setBusy(true);
     setError('');
     try {
-      const free = await refreshAvailableUsdt();
+      const walletFree = await refreshAvailableUsdt();
+            const reservedUsdt = Array.from(accumulationRef.current.values()).reduce((sum, item) => sum + item.soldQuoteUsdt, 0);
+            const free = Math.max(0, walletFree - reservedUsdt);
       if (free + 1e-8 < trade) {
         setSmartStatus(`Za mało wolnych USDT (${free.toFixed(2)}). Skaner działa dalej.`);
         return;
@@ -431,9 +433,9 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const tryStartAccumulation = async (trade: number): Promise<boolean> => {
-    if (accumulationRef.current || sellBusyRef.current) return false;
+    if (sellBusyRef.current) return false;
     const candidates = livePositionsRef.current
-      .filter((position) => position.fromPortfolio && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0)
+      .filter((position) => position.fromPortfolio && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0 && !accumulationRef.current.has(position.symbol))
       .sort((a, b) => (b.currentMovePct - b.peakMovePct) - (a.currentMovePct - a.peakMovePct));
 
     for (const position of candidates) {
@@ -483,8 +485,8 @@ export const TradeScreen: React.FC<Props> = ({
           targetBuyPrice: actualSellPrice * (1 - ACCUMULATION_REBUY_DROP_PCT / 100),
           startedAt: Date.now(),
         };
-        accumulationRef.current = cycle;
-        setAccumulationCycle(cycle);
+        accumulationRef.current.set(cycle.symbol, cycle);
+        setAccumulationCycles(Array.from(accumulationRef.current.values()));
         sessionProfitRef.current += Math.max(0, realizedPnl);
         setSessionProfit(sessionProfitRef.current);
         setSmartStatus(`SMART ACCUMULATION SELL ${position.symbol}: ${soldQty.toPrecision(7)} sprzedane po ${priceText(actualSellPrice)}. Czekam na odkup ≤ ${priceText(cycle.targetBuyPrice)}.`);
@@ -498,9 +500,10 @@ export const TradeScreen: React.FC<Props> = ({
     return false;
   };
 
-  const tryFinishAccumulation = async (): Promise<boolean> => {
-    const cycle = accumulationRef.current;
-    if (!cycle || sellBusyRef.current) return false;
+  const tryFinishAccumulation = async (symbol?: string): Promise<boolean> => {
+    if (sellBusyRef.current) return false;
+    const cycle = symbol ? accumulationRef.current.get(symbol) : Array.from(accumulationRef.current.values())[0];
+    if (!cycle) return false;
 
     const first = await fetchSpotMarketSnapshot(cycle.symbol);
     const firstAsk = first.ask > 0 ? first.ask : first.lastPrice;
@@ -562,8 +565,8 @@ export const TradeScreen: React.FC<Props> = ({
       setAccumulatedCoin(accumulatedCoinRef.current);
       cycleCountRef.current += 1;
       setCycleCount(cycleCountRef.current);
-      accumulationRef.current = null;
-      setAccumulationCycle(null);
+      accumulationRef.current.delete(cycle.symbol);
+      setAccumulationCycles(Array.from(accumulationRef.current.values()));
       setSmartStatus(`SMART ACCUMULATION BUY BACK ${cycle.symbol}: odkupiono ${boughtQty.toPrecision(7)}. Zmiana ilości coina w cyklu: ${extraCoin >= 0 ? '+' : ''}${extraCoin.toPrecision(5)}.`);
       await refreshAvailableUsdt();
       return true;
@@ -598,9 +601,9 @@ export const TradeScreen: React.FC<Props> = ({
     cycleCountRef.current = 0;
     sessionProfitRef.current = 0;
     shadowPositionsRef.current = [];
-    accumulationRef.current = null;
+    accumulationRef.current.clear();
     accumulatedCoinRef.current = 0;
-    setAccumulationCycle(null);
+    setAccumulationCycles([]);
     setAccumulatedCoin(0);
     setSmartRunning(true);
     setError('');
@@ -699,10 +702,11 @@ export const TradeScreen: React.FC<Props> = ({
             livePositionsRef.current = refreshed;
             setLivePositions([...refreshed]);
 
-            if (accumulationRef.current) {
-              await tryFinishAccumulation();
-              await sleep(900);
-              continue;
+            if (accumulationRef.current.size > 0) {
+              for (const activeCycle of Array.from(accumulationRef.current.values())) {
+                if (stopRef.current) break;
+                await tryFinishAccumulation(activeCycle.symbol);
+              }
             }
 
             const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
@@ -713,7 +717,7 @@ export const TradeScreen: React.FC<Props> = ({
             }
 
             const free = await refreshAvailableUsdt();
-            if (refreshed.length < slots && free + 1e-8 >= trade) {
+            if (refreshed.filter((item) => !item.fromPortfolio).length < slots && free + 1e-8 >= trade) {
               const candidate = await scanBestCandidate();
               if (candidate && livePositionsRef.current.every((item) => item.symbol !== candidate.market.symbol)) await buyCandidate(candidate, trade, slots);
             } else if (free + 1e-8 < trade) {
@@ -787,13 +791,13 @@ export const TradeScreen: React.FC<Props> = ({
           <View style={styles.smartHeader}>
             <View style={{ flex: 1 }}>
               <Text style={styles.smartTitle}>SMART AUTO</Text>
-              <Text style={styles.smartSub}>AUTO BUY • AUTO SELL • SMART ACCUMULATION przy braku USDT</Text>
+              <Text style={styles.smartSub}>AUTO BUY • AUTO SELL • niezależne BUY • HOLD • SELL per coin</Text>
             </View>
             <Switch value={smartEnabled} onValueChange={(value) => { if (!smartRunning) setSmartEnabled(value); }} disabled={smartRunning} />
           </View>
 
           {smartEnabled && <>
-            <Text style={styles.smartNotice}>Gdy wystarcza USDT, bot korzysta z normalnego SMART AUTO. SMART ACCUMULATION używa domyślnie 10% zarządzanego coina (wartość możesz zmienić ręcznie), sprzedaje część roboczą po potwierdzeniu lokalnej górki i odkupuje ją niżej po potwierdzeniu odbicia. SELL → BUY = 1 cykl akumulacji.</Text>
+            <Text style={styles.smartNotice}>Każdy coin ma niezależny cykl. Bot może jednocześnie czekać na odkup BTC i analizować lub handlować innymi parami. USDT ze sprzedaży w aktywnym cyklu jest rezerwowane wyłącznie na odkup tego coina.</Text>
 
             <View style={styles.modeRow}>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>SMART AUTO</Text></TouchableOpacity>
@@ -823,7 +827,7 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.accTitle}>SMART ACCUMULATION</Text>
               <Text style={styles.smallLabel}>Kapitał roboczy coina (%) — domyślnie 10%</Text>
               <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.accLine}>{accumulationCycle ? `${accumulationCycle.symbol}: po SELL, cel odkupu ${priceText(accumulationCycle.targetBuyPrice)}` : 'Gotowy — uruchamia się automatycznie, gdy brakuje USDT.'}</Text>
+              <Text style={styles.accLine}>{accumulationCycles[0] ? `${accumulationCycles[0].symbol}: po SELL, cel odkupu ${priceText(accumulationCycles[0].targetBuyPrice)}` : 'Gotowy — uruchamia się automatycznie, gdy brakuje USDT.'}</Text>
               <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
             </View>}
 
