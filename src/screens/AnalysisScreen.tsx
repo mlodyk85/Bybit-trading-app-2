@@ -1,0 +1,34 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { fetchSpotUsdtMarketCandidates, SpotMarketCandidate } from '../api/bybit';
+
+interface Props { onUseSymbol: (symbol: string) => void; }
+type Signal = 'DOŁEK' | 'GÓRKA' | 'TREND' | 'WAIT';
+interface AnalysisRow extends SpotMarketCandidate { signal: Signal; score: number; reason: string; }
+
+const classify = (m: SpotMarketCandidate): AnalysisRow => {
+  const range = Math.max(0, m.high24h - m.low24h);
+  const pos = range > 0 ? (m.lastPrice - m.low24h) / range : 0.5;
+  const spreadQuality = Math.max(0, 1 - m.spreadPct / 0.25);
+  let signal: Signal = 'WAIT', reason = 'Brak czytelnej przewagi.', raw = 0.35;
+  if (pos <= 0.22 && m.change24hPct < 0) { signal='DOŁEK'; raw=0.55+(0.22-pos)+spreadQuality*0.12; reason='Cena blisko dołka 24h po spadku; obserwuj potwierdzenie odbicia.'; }
+  else if (pos >= 0.82 && m.change24hPct > 0) { signal='GÓRKA'; raw=0.55+(pos-0.82)+spreadQuality*0.12; reason='Cena blisko górki 24h po wzroście; obserwuj osłabienie momentum.'; }
+  else if (m.change24hPct > 1 && pos > 0.55) { signal='TREND'; raw=0.48+Math.min(0.2,m.change24hPct/30)+spreadQuality*0.1; reason='Dodatni trend 24h i cena w górnej części zakresu.'; }
+  const liquidity=Math.min(1,Math.log10(Math.max(1,m.turnover24h))/9);
+  const score=Math.round(Math.min(99,Math.max(1,(raw*0.75+liquidity*0.15+spreadQuality*0.1)*100)));
+  return {...m,signal,score,reason};
+};
+const price=(v:number)=>v>=1000?v.toFixed(2):v>=1?v.toFixed(5):v.toFixed(8);
+const num=(v:string)=>Number(v.replace(',','.'));
+
+export const AnalysisScreen: React.FC<Props> = ({onUseSymbol}) => {
+  const [rows,setRows]=useState<AnalysisRow[]>([]), [loading,setLoading]=useState(false), [error,setError]=useState('');
+  const [capital,setCapital]=useState('100'), [move,setMove]=useState('0.5'), [target,setTarget]=useState('10'), [costPct,setCostPct]=useState('0.2');
+  const refresh=async()=>{setLoading(true);setError('');try{setRows((await fetchSpotUsdtMarketCandidates(80)).map(classify).sort((a,b)=>b.score-a.score));}catch(e){setError(e instanceof Error?e.message:'Błąd analizy rynku.');}finally{setLoading(false);}};
+  useEffect(()=>{void refresh();const id=setInterval(()=>void refresh(),10000);return()=>clearInterval(id);},[]);
+  const calc=useMemo(()=>{const c=Math.max(0,num(capital)||0),m=Math.max(0,num(move)||0),t=Math.max(0,num(target)||0),costs=Math.max(0,num(costPct)||0);const gross=c*m/100,estimatedCosts=c*costs/100,net=gross-estimatedCosts,netRate=Math.max(0,(m-costs)/100);return{gross,estimatedCosts,net,required:netRate>0?t/netRate:0};},[capital,move,target,costPct]);
+  const section=(title:string,data:AnalysisRow[])=><View style={s.section}><Text style={s.h2}>{title}</Text>{data.length===0?<Text style={s.muted}>Brak mocnych kandydatów w tej chwili.</Text>:data.map(r=><TouchableOpacity key={r.symbol} style={s.card} onPress={()=>onUseSymbol(r.symbol)}><View style={s.line}><Text style={s.symbol}>{r.symbol}</Text><Text style={s.badge}>{r.signal} • score {r.score}/100</Text></View><Text style={s.price}>{price(r.lastPrice)} USDT • 24h {r.change24hPct>=0?'+':''}{r.change24hPct.toFixed(2)}%</Text><Text style={s.meta}>Zakres 24h: {price(r.low24h)} – {price(r.high24h)} • spread {r.spreadPct.toFixed(3)}%</Text><Text style={s.reason}>{r.reason}</Text><Text style={s.open}>Otwórz w Trade →</Text></TouchableOpacity>)}</View>;
+  return <SafeAreaView style={s.safe}><ScrollView contentContainerStyle={s.container} refreshControl={<RefreshControl refreshing={loading} onRefresh={refresh}/>}><Text style={s.title}>Analiza rynku</Text><Text style={s.sub}>Skan Spot/USDT • górki, dołki, trend i kalkulator scenariusza</Text><View style={s.notice}><Text style={s.noticeText}>Score jest heurystycznym wynikiem analizy rynku, nie prawdopodobieństwem zysku. Docelowo zastąpi go kalibrowany wynik modelu uczącego.</Text></View>{!!error&&<Text style={s.err}>{error}</Text>}{loading&&rows.length===0&&<ActivityIndicator color="#F0B90B"/>}{section('Potencjalne dołki',rows.filter(r=>r.signal==='DOŁEK').slice(0,8))}{section('Potencjalne górki',rows.filter(r=>r.signal==='GÓRKA').slice(0,8))}{section('Trend / HOLD',rows.filter(r=>r.signal==='TREND').slice(0,6))}
+  <View style={s.section}><Text style={s.h2}>Kalkulator scenariusza</Text><Text style={s.label}>Kapitał (USDT)</Text><TextInput style={s.input} keyboardType="decimal-pad" value={capital} onChangeText={setCapital}/><Text style={s.label}>Zakładany ruch ceny (%)</Text><TextInput style={s.input} keyboardType="decimal-pad" value={move} onChangeText={setMove}/><Text style={s.label}>Szacowane łączne koszty: fee + spread + slippage (%)</Text><TextInput style={s.input} keyboardType="decimal-pad" value={costPct} onChangeText={setCostPct}/><Text style={s.result}>Brutto: {calc.gross.toFixed(4)} USDT</Text><Text style={s.result}>Koszty: ~{calc.estimatedCosts.toFixed(4)} USDT</Text><Text style={s.resultStrong}>Netto: ~{calc.net.toFixed(4)} USDT</Text><Text style={s.label}>Chcę uzyskać netto (USDT)</Text><TextInput style={s.input} keyboardType="decimal-pad" value={target} onChangeText={setTarget}/><Text style={s.resultStrong}>{calc.required>0?'Przy ruchu '+move+'% i kosztach '+costPct+'% potrzeba około '+calc.required.toFixed(2)+' USDT.':'Założony ruch nie pokrywa wpisanych kosztów.'}</Text><Text style={s.muted}>To kalkulacja scenariusza, nie prognoza ani gwarancja wyniku.</Text></View></ScrollView></SafeAreaView>;
+};
+const s=StyleSheet.create({safe:{flex:1,backgroundColor:'#121212'},container:{padding:16,paddingBottom:90},title:{color:'#fff',fontSize:25,fontWeight:'800'},sub:{color:'#9CA3AF',marginTop:4,marginBottom:14},notice:{backgroundColor:'#1E1E1E',borderWidth:1,borderColor:'#3A3A3A',padding:12,borderRadius:12},noticeText:{color:'#D1D5DB',fontSize:12,lineHeight:17},section:{marginTop:18},h2:{color:'#F0B90B',fontSize:18,fontWeight:'800',marginBottom:9},card:{backgroundColor:'#1E1E1E',borderRadius:13,padding:13,marginBottom:9,borderWidth:1,borderColor:'#2C2C2C'},line:{flexDirection:'row',justifyContent:'space-between'},symbol:{color:'#fff',fontSize:16,fontWeight:'800'},badge:{color:'#F0B90B',fontWeight:'700',fontSize:11},price:{color:'#fff',marginTop:7},meta:{color:'#9CA3AF',fontSize:11,marginTop:4},reason:{color:'#D1D5DB',fontSize:12,marginTop:7,lineHeight:17},open:{color:'#F0B90B',fontSize:12,fontWeight:'700',marginTop:8},label:{color:'#D1D5DB',fontSize:12,marginTop:10,marginBottom:5},input:{backgroundColor:'#242424',borderWidth:1,borderColor:'#3A3A3A',borderRadius:9,color:'#fff',paddingHorizontal:12,paddingVertical:9},result:{color:'#D1D5DB',marginTop:8},resultStrong:{color:'#fff',fontWeight:'800',marginTop:8},muted:{color:'#8E8E93',fontSize:12,lineHeight:17},err:{color:'#EF4444',marginTop:10}});
