@@ -73,8 +73,9 @@ const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
 const SCAN_SAMPLES = 7;
 const SCAN_INTERVAL_MS = 1400;
-const MIN_ENTRY_MOMENTUM_PCT = 0.05;
-const MAX_ENTRY_MOMENTUM_PCT = 2.5;
+const BUY_DIP_MIN_PCT = -0.30;
+const BUY_DIP_MAX_PCT = -2.50;
+const BUY_REVERSAL_PCT = 0.05;
 const MAX_SPREAD_PCT = 0.20;
 const AUTO_SELL_PROFIT_PCT = 0.10;
 const SMART_MIN_TRADE_USDT = 10;
@@ -320,15 +321,18 @@ export const TradeScreen: React.FC<Props> = ({
       const windowMomentumPct = ((now.lastPrice - first.lastPrice) / first.lastPrice) * 100;
       const shortMomentumPct = ((now.lastPrice - shortBase.lastPrice) / shortBase.lastPrice) * 100;
 
-      if (!bestObserved || windowMomentumPct > bestObserved.momentum) bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
+      if (!bestObserved || windowMomentumPct < bestObserved.momentum) bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
 
       const isCore = CORE_SYMBOLS.has(now.symbol);
-      if (windowMomentumPct < MIN_ENTRY_MOMENTUM_PCT || windowMomentumPct > MAX_ENTRY_MOMENTUM_PCT) continue;
-      if (shortMomentumPct < 0 || now.spreadPct > MAX_SPREAD_PCT) continue;
+      // BUY only after a real dip: the wider window must still be negative,
+      // while the short window confirms that price has started reversing upward.
+      if (windowMomentumPct > BUY_DIP_MIN_PCT || windowMomentumPct < BUY_DIP_MAX_PCT) continue;
+      if (shortMomentumPct < BUY_REVERSAL_PCT || now.spreadPct > MAX_SPREAD_PCT) continue;
 
       const liquidityScore = Math.max(0, Math.log10(Math.max(now.turnover24h, 1)) - 5);
       const coreQualityBonus = isCore ? 18 : 0;
-      const score = windowMomentumPct * 260 + shortMomentumPct * 420 + liquidityScore * 2.2 + coreQualityBonus - now.spreadPct * 70;
+      const dipDepth = Math.abs(windowMomentumPct);
+      const score = dipDepth * 180 + shortMomentumPct * 520 + liquidityScore * 2.2 + coreQualityBonus - now.spreadPct * 70;
       ranked.push({ market: now, windowMomentumPct, shortMomentumPct, score });
     }
 
@@ -337,9 +341,9 @@ export const TradeScreen: React.FC<Props> = ({
     setActiveScore(best);
     if (best) {
       const quality = CORE_SYMBOLS.has(best.market.symbol) ? 'CORE' : 'ALT';
-      setScanInfo(`WYBRANO ${best.market.symbol} • ${quality} • ruch +${best.windowMomentumPct.toFixed(4)}% • krótki +${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
+      setScanInfo(`DOŁEK ${best.market.symbol} • ${quality} • spadek ${best.windowMomentumPct.toFixed(4)}% • odbicie +${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
     } else if (bestObserved) {
-      setScanInfo(`BRAK WEJŚCIA • najlepszy ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • próg BUY +${MIN_ENTRY_MOMENTUM_PCT.toFixed(2)}%`);
+      setScanInfo(`BRAK DOŁKA • ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • BUY wymaga spadku ≤ ${BUY_DIP_MIN_PCT.toFixed(2)}% i potwierdzonego odbicia`);
     } else {
       setScanInfo('BRAK WEJŚCIA • za mało danych');
     }
@@ -604,7 +608,7 @@ export const TradeScreen: React.FC<Props> = ({
     setScanCount(0);
     setSessionProfit(0);
     setActiveScore(null);
-    setScanInfo(`Start skanera • AUTO BUY od +${MIN_ENTRY_MOMENTUM_PCT.toFixed(2)}% • AUTO SELL przy +${AUTO_SELL_PROFIT_PCT.toFixed(2)}% • SMART ACCUMULATION przy braku USDT`);
+    setScanInfo(`Start skanera • AUTO BUY na lokalnym dołku (spadek ≤ ${BUY_DIP_MIN_PCT.toFixed(2)}% + odbicie) • AUTO SELL na plusie • SMART ACCUMULATION`);
 
     if (smartMode === 'shadow') {
       shadowUsdtRef.current = virtualCapital;
@@ -824,7 +828,7 @@ export const TradeScreen: React.FC<Props> = ({
             </View>}
 
             {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
-            {activeScore && <Text style={styles.candidate}>Kandydat: {activeScore.market.symbol} • +{activeScore.windowMomentumPct.toFixed(4)}%</Text>}
+            {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
             {positionsToRender.map((position) => {
