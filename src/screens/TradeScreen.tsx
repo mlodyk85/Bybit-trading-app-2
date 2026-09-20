@@ -179,11 +179,6 @@ export const TradeScreen: React.FC<Props> = ({
     return () => { mounted = false; clearInterval(timer); };
   }, [symbol]);
 
-  const switchManagedHolding = (holding: AssetSmartAutoSeed) => {
-    setSymbol(holding.symbol.toUpperCase());
-    setSmartEnabled(true);
-  };
-
   const filteredPairs = useMemo(() => {
     const query = pairSearch.trim().toUpperCase();
     return query ? pairs.filter((pair) => pair.includes(query)) : pairs;
@@ -671,13 +666,15 @@ export const TradeScreen: React.FC<Props> = ({
       setShadowPositions([]);
     } else {
       void refreshAvailableUsdt();
-      if (initialHolding && livePositionsRef.current.every((item) => item.symbol !== initialHolding.symbol)) {
+      const portfolioSeeds = managedHoldings.length > 0 ? managedHoldings : (initialHolding ? [initialHolding] : []);
+      for (const holding of portfolioSeeds) {
+        if (livePositionsRef.current.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
         const seed: TrackedPosition = {
-          id: `portfolio-${initialHolding.symbol}-${Date.now()}`,
-          symbol: initialHolding.symbol,
-          qty: initialHolding.baseQty,
-          costUsdt: initialHolding.buyCostUsdt,
-          entryPrice: initialHolding.buyPrice,
+          id: `portfolio-${holding.symbol}-${Date.now()}`,
+          symbol: holding.symbol,
+          qty: holding.baseQty,
+          costUsdt: holding.buyCostUsdt,
+          entryPrice: holding.buyPrice,
           peakMovePct: 0,
           currentMovePct: 0,
           currentPnlUsdt: 0,
@@ -685,8 +682,8 @@ export const TradeScreen: React.FC<Props> = ({
           fromPortfolio: true,
         };
         livePositionsRef.current = [...livePositionsRef.current, seed];
-        setLivePositions([...livePositionsRef.current]);
       }
+      setLivePositions([...livePositionsRef.current]);
     }
 
     void (async () => {
