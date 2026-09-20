@@ -149,10 +149,41 @@ export const TradeScreen: React.FC<Props> = ({
   const accumulatedCoinRef = useRef(0);
 
   useEffect(() => {
-    if (!smartRunning && initialSymbol) { setSymbol(initialSymbol.toUpperCase()); onHoldingConsumed?.(); }
-    if (initialHolding && !smartRunning) setSmartEnabled(true);
+    // Manual Trade selection is UI state only. A running bot must never lock the pair selector.
+    if (initialSymbol) {
+      setSymbol(initialSymbol.toUpperCase());
+      onHoldingConsumed?.();
+    }
+    if (initialHolding) setSmartEnabled(true);
     setManagedHoldings(initialHoldings);
-  }, [initialHolding, initialHoldings, initialSymbol, onHoldingConsumed, smartRunning]);
+
+    // When another portfolio coin is enabled while the scanner is already running,
+    // attach it as its own independent tracked position instead of ignoring it until restart.
+    if (smartRunning && smartMode === 'assist') {
+      let changed = false;
+      let next = [...livePositionsRef.current];
+      for (const holding of initialHoldings) {
+        if (next.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
+        next.push({
+          id: `portfolio-${holding.symbol}-${Date.now()}`,
+          symbol: holding.symbol,
+          qty: holding.baseQty,
+          costUsdt: holding.buyCostUsdt,
+          entryPrice: holding.buyPrice,
+          peakMovePct: 0,
+          currentMovePct: 0,
+          currentPnlUsdt: 0,
+          sellReady: false,
+          fromPortfolio: true,
+        });
+        changed = true;
+      }
+      if (changed) {
+        livePositionsRef.current = next;
+        setLivePositions([...next]);
+      }
+    }
+  }, [initialHolding, initialHoldings, initialSymbol, onHoldingConsumed, smartMode, smartRunning]);
 
   useEffect(() => {
     const value = toNumber(amount);
