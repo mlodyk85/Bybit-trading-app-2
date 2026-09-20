@@ -77,12 +77,18 @@ const BUY_DIP_MIN_PCT = -0.30;
 const BUY_DIP_MAX_PCT = -2.50;
 const BUY_REVERSAL_PCT = 0.05;
 const MAX_SPREAD_PCT = 0.20;
-const AUTO_SELL_PROFIT_PCT = 0.10;
+// Safety-first thresholds. The bot never intentionally triggers a SELL at break-even.
+const AUTO_SELL_PROFIT_PCT = 0.35;
+const AUTO_SELL_MIN_NET_USDT = 0.01;
+const AUTO_SELL_MIN_NET_PCT = 0.08;
+const EXIT_COST_BUFFER_PCT = 0.18;
 const SMART_MIN_TRADE_USDT = 10;
 const ACCUMULATION_DEFAULT_SHARE = 0.10;
-const ACCUMULATION_MIN_PROFIT_PCT = 0.20;
-const ACCUMULATION_PEAK_PULLBACK_PCT = 0.06;
-const ACCUMULATION_REBUY_DROP_PCT = 0.20;
+const ACCUMULATION_MIN_PROFIT_PCT = 0.45;
+const ACCUMULATION_PEAK_PULLBACK_PCT = 0.08;
+const ACCUMULATION_REBUY_DROP_PCT = 0.45;
+const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.03;
+const REBUY_COST_BUFFER_PCT = 0.18;
 
 export const TradeScreen: React.FC<Props> = ({
   credentials,
@@ -178,7 +184,14 @@ export const TradeScreen: React.FC<Props> = ({
     try {
       const wallet = await fetchWalletBalance(credentials);
       const coin = wallet?.coin?.find((item) => item.coin === 'USDT');
-      const free = Number(coin?.free || coin?.availableToWithdraw || coin?.walletBalance || 0);
+      const walletBalance = Number(coin?.walletBalance || 0);
+      const locked = Number(coin?.locked || 0);
+      const explicitFree = Number(coin?.free || 0);
+      const withdrawable = Number(coin?.availableToWithdraw || 0);
+      const walletMinusLocked = Number.isFinite(walletBalance) ? Math.max(0, walletBalance - Math.max(0, locked)) : 0;
+      // Under Unified accounts "free" can lag or represent a narrower bucket than the Assets screen.
+      // Prefer walletBalance - locked, while keeping the explicit API fields as fallbacks.
+      const free = Math.max(walletMinusLocked, explicitFree, withdrawable);
       const value = Number.isFinite(free) && free > 0 ? free : 0;
       setAvailableUsdt(value);
       return value;
@@ -355,8 +368,11 @@ export const TradeScreen: React.FC<Props> = ({
     const executablePrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
     const movePct = position.entryPrice > 0 ? ((executablePrice - position.entryPrice) / position.entryPrice) * 100 : 0;
     const peakMovePct = Math.max(position.peakMovePct, movePct);
-    const currentPnlUsdt = executablePrice * position.qty - position.costUsdt;
-    const sellReady = movePct >= AUTO_SELL_PROFIT_PCT && currentPnlUsdt > 0;
+    const grossExitValue = executablePrice * position.qty;
+    const conservativeExitCost = grossExitValue * (EXIT_COST_BUFFER_PCT / 100);
+    const currentPnlUsdt = grossExitValue - conservativeExitCost - position.costUsdt;
+    const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+    const sellReady = movePct >= AUTO_SELL_PROFIT_PCT && currentPnlUsdt >= minNetProfit;
     return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady };
   };
 
@@ -379,11 +395,12 @@ export const TradeScreen: React.FC<Props> = ({
       const fill = await waitForSpotFill(credentials, ack.orderId);
       const baseCoin = candidate.market.symbol.replace(/USDT$/, '');
       const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
+      const buyFeeUsdt = fill.feeByCurrency.USDT || 0;
       const position: TrackedPosition = {
         id: ack.orderId,
         symbol: candidate.market.symbol,
         qty,
-        costUsdt: fill.quoteValue,
+        costUsdt: fill.quoteValue + buyFeeUsdt,
         entryPrice: fill.avgPrice,
         peakMovePct: 0,
         currentMovePct: 0,
@@ -405,7 +422,8 @@ export const TradeScreen: React.FC<Props> = ({
 
   const executeAssistSell = async (position: TrackedPosition) => {
     if (sellBusyRef.current || position.fromPortfolio) return;
-    if (!position.sellReady || position.currentPnlUsdt <= 0) return;
+    const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+    if (!position.sellReady || position.currentPnlUsdt < minNetProfit) return;
 
     sellBusyRef.current = true;
     setBusy(true);
@@ -413,14 +431,25 @@ export const TradeScreen: React.FC<Props> = ({
     try {
       const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty);
       const fill = await waitForSpotFill(credentials, ack.orderId);
-      const pnl = fill.quoteValue - position.costUsdt;
+      const baseCoin = position.symbol.replace(/USDT$/, '');
+      const sellFeeUsdt = fill.feeByCurrency.USDT || 0;
+      const sellFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
+      const netProceeds = Math.max(0, fill.quoteValue - sellFeeUsdt - sellFeeBaseUsdt);
+      const pnl = netProceeds - position.costUsdt;
       livePositionsRef.current = livePositionsRef.current.filter((item) => item.id !== position.id);
       setLivePositions([...livePositionsRef.current]);
-      cycleCountRef.current += 1;
-      sessionProfitRef.current += pnl;
-      setCycleCount(cycleCountRef.current);
-      setSessionProfit(sessionProfitRef.current);
-      setSmartStatus(`AUTO SELL ${position.symbol} • wynik ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} USDT. Skaner działa dalej.`);
+      if (pnl > 0) {
+        cycleCountRef.current += 1;
+        sessionProfitRef.current += pnl;
+        setCycleCount(cycleCountRef.current);
+        setSessionProfit(sessionProfitRef.current);
+        setSmartStatus(`AUTO SELL ${position.symbol} • NETTO +${pnl.toFixed(4)} USDT po fee. Skaner działa dalej.`);
+      } else {
+        // Market fills can move between quote and execution. Do not count a non-positive fill as a successful cycle.
+        sessionProfitRef.current += pnl;
+        setSessionProfit(sessionProfitRef.current);
+        setSmartStatus(`SAFETY: ${position.symbol} fill zakończył się ${pnl.toFixed(4)} USDT po fee. Cykl NIE został zaliczony.`);
+      }
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd SELL.';
@@ -460,9 +489,12 @@ export const TradeScreen: React.FC<Props> = ({
         const ack = await placeSpotMarketSellBase(credentials, position.symbol, qty);
         const fill = await waitForSpotFill(credentials, ack.orderId);
         const soldQty = fill.baseQty > 0 ? fill.baseQty : qty;
-        const soldQuoteUsdt = fill.quoteValue;
+        const baseCoin = position.symbol.replace(/USDT$/, '');
+        const sellFeeUsdt = fill.feeByCurrency.USDT || 0;
+        const sellFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
+        const soldQuoteUsdt = Math.max(0, fill.quoteValue - sellFeeUsdt - sellFeeBaseUsdt);
         const actualSellPrice = fill.avgPrice > 0 ? fill.avgPrice : soldQuoteUsdt / soldQty;
-        const soldCost = position.entryPrice * soldQty;
+        const soldCost = position.qty > 0 ? position.costUsdt * (soldQty / position.qty) : 0;
         const realizedPnl = soldQuoteUsdt - soldCost;
 
         const remainingQty = Math.max(0, position.qty - soldQty);
@@ -482,12 +514,15 @@ export const TradeScreen: React.FC<Props> = ({
           soldQty,
           soldQuoteUsdt,
           sellPrice: actualSellPrice,
-          targetBuyPrice: actualSellPrice * (1 - ACCUMULATION_REBUY_DROP_PCT / 100),
+          targetBuyPrice: Math.min(
+            actualSellPrice * (1 - ACCUMULATION_REBUY_DROP_PCT / 100),
+            (soldQuoteUsdt / soldQty) * (1 - REBUY_COST_BUFFER_PCT / 100)
+          ),
           startedAt: Date.now(),
         };
         accumulationRef.current.set(cycle.symbol, cycle);
         setAccumulationCycles(Array.from(accumulationRef.current.values()));
-        sessionProfitRef.current += Math.max(0, realizedPnl);
+        sessionProfitRef.current += realizedPnl;
         setSessionProfit(sessionProfitRef.current);
         setSmartStatus(`SMART ACCUMULATION SELL ${position.symbol}: ${soldQty.toPrecision(7)} sprzedane po ${priceText(actualSellPrice)}. Czekam na odkup ≤ ${priceText(cycle.targetBuyPrice)}.`);
         await refreshAvailableUsdt();
@@ -507,7 +542,11 @@ export const TradeScreen: React.FC<Props> = ({
 
     const first = await fetchSpotMarketSnapshot(cycle.symbol);
     const firstAsk = first.ask > 0 ? first.ask : first.lastPrice;
-    if (firstAsk <= 0 || firstAsk > cycle.targetBuyPrice) {
+    const minBoughtQty = cycle.soldQty * (1 + ACCUMULATION_MIN_COIN_GAIN_PCT / 100);
+    const conservativeBoughtQty = firstAsk > 0
+      ? (Math.min(cycle.soldQuoteUsdt, maxOrderUsdt) / firstAsk) * (1 - REBUY_COST_BUFFER_PCT / 100)
+      : 0;
+    if (firstAsk <= 0 || firstAsk > cycle.targetBuyPrice || conservativeBoughtQty <= minBoughtQty) {
       setSmartStatus(`SMART ACCUMULATION ${cycle.symbol}: po SELL czekam na dołek. Teraz ${priceText(firstAsk)}, cel ≤ ${priceText(cycle.targetBuyPrice)}.`);
       return false;
     }
@@ -563,11 +602,15 @@ export const TradeScreen: React.FC<Props> = ({
 
       accumulatedCoinRef.current += extraCoin;
       setAccumulatedCoin(accumulatedCoinRef.current);
-      cycleCountRef.current += 1;
-      setCycleCount(cycleCountRef.current);
+      if (extraCoin > 0) {
+        cycleCountRef.current += 1;
+        setCycleCount(cycleCountRef.current);
+      }
       accumulationRef.current.delete(cycle.symbol);
       setAccumulationCycles(Array.from(accumulationRef.current.values()));
-      setSmartStatus(`SMART ACCUMULATION BUY BACK ${cycle.symbol}: odkupiono ${boughtQty.toPrecision(7)}. Zmiana ilości coina w cyklu: ${extraCoin >= 0 ? '+' : ''}${extraCoin.toPrecision(5)}.`);
+      setSmartStatus(extraCoin > 0
+        ? `SMART ACCUMULATION BUY BACK ${cycle.symbol}: odkupiono ${boughtQty.toPrecision(7)}. Coin +${extraCoin.toPrecision(5)} po fee.`
+        : `SAFETY: BUY BACK ${cycle.symbol} nie zwiększył ilości coina (${extraCoin.toPrecision(5)}). Cykl NIE został zaliczony.`);
       await refreshAvailableUsdt();
       return true;
     } catch (e: unknown) {
@@ -611,7 +654,7 @@ export const TradeScreen: React.FC<Props> = ({
     setScanCount(0);
     setSessionProfit(0);
     setActiveScore(null);
-    setScanInfo(`Start skanera • AUTO BUY na lokalnym dołku (spadek ≤ ${BUY_DIP_MIN_PCT.toFixed(2)}% + odbicie) • AUTO SELL na plusie • SMART ACCUMULATION`);
+    setScanInfo(`Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
 
     if (smartMode === 'shadow') {
       shadowUsdtRef.current = virtualCapital;
@@ -836,11 +879,11 @@ export const TradeScreen: React.FC<Props> = ({
             <Text style={styles.status}>{smartStatus}</Text>
 
             {positionsToRender.map((position) => {
-              const state = position.currentPnlUsdt <= 0 ? 'CZEKA NA PLUS' : position.sellReady ? 'AUTO SELL READY' : 'NA PLUSIE';
+              const state = position.currentPnlUsdt <= 0 ? 'CZEKA NA PLUS' : position.sellReady ? 'AUTO SELL READY' : 'NETTO NA PLUSIE';
               return <View key={position.id} style={styles.positionCard}><View style={{ flex: 1 }}>
                 <Text style={styles.positionSymbol}>{position.symbol} • {position.fromPortfolio ? 'ACCUMULATION' : state}</Text>
                 <Text style={styles.positionLine}>wejście {priceText(position.entryPrice)} • ruch {position.currentMovePct >= 0 ? '+' : ''}{position.currentMovePct.toFixed(4)}%</Text>
-                <Text style={styles.positionLine}>max +{Math.max(0, position.peakMovePct).toFixed(4)}% • PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
+                <Text style={styles.positionLine}>max +{Math.max(0, position.peakMovePct).toFixed(4)}% • est. NET PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
               </View></View>;
             })}
 
