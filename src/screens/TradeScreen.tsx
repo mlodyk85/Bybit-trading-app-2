@@ -880,7 +880,7 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.accTitle}>SMART ACCUMULATION</Text>
               <Text style={styles.smallLabel}>Kapitał roboczy coina (%) — domyślnie 10%</Text>
               <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.accLine}>{accumulationCycles[0] ? `${accumulationCycles[0].symbol}: po SELL, cel odkupu ${priceText(accumulationCycles[0].targetBuyPrice)}` : 'Gotowy — uruchamia się automatycznie, gdy brakuje USDT.'}</Text>
+              <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Gotowy — ${managedHoldings.length || (initialHolding ? 1 : 0)} coinów zarządzanych niezależnie; wolne USDT nie blokuje akumulacji.`}</Text>
               <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
             </View>}
 
