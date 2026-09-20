@@ -470,7 +470,7 @@ export const TradeScreen: React.FC<Props> = ({
     }
   };
 
-  const tryStartAccumulation = async (trade: number): Promise<boolean> => {
+  const tryStartAccumulation = async (): Promise<boolean> => {
     if (sellBusyRef.current) return false;
     const candidates = livePositionsRef.current
       .filter((position) => position.fromPortfolio && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0 && !accumulationRef.current.has(position.symbol))
@@ -766,7 +766,7 @@ export const TradeScreen: React.FC<Props> = ({
 
             // Smart Accumulation is independent from free USDT: every managed portfolio coin
             // continuously gets its own HOLD -> SELL -> WAIT -> BUY BACK cycle.
-            const accumulationStarted = await tryStartAccumulation(trade);
+            const accumulationStarted = await tryStartAccumulation();
             if (accumulationStarted) {
               await sleep(350);
               continue;
