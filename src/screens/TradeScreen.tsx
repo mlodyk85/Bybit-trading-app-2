@@ -161,7 +161,7 @@ export const TradeScreen: React.FC<Props> = ({
     // attach it as its own independent tracked position instead of ignoring it until restart.
     if (smartRunning && smartMode === 'assist') {
       let changed = false;
-      let next = [...livePositionsRef.current];
+      const next = [...livePositionsRef.current];
       for (const holding of initialHoldings) {
         if (next.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
         next.push({
