@@ -31,6 +31,7 @@ interface Props {
   credentials: ApiCredentials;
   initialSymbol?: string;
   initialHolding?: AssetSmartAutoSeed | null;
+  initialHoldings?: AssetSmartAutoSeed[];
   maxOrderUsdt: number;
   onHoldingConsumed?: () => void;
 }
@@ -94,6 +95,7 @@ export const TradeScreen: React.FC<Props> = ({
   credentials,
   initialSymbol = 'BTCUSDT',
   initialHolding = null,
+  initialHoldings = [],
   maxOrderUsdt,
   onHoldingConsumed,
 }) => {
@@ -129,6 +131,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [accumulationCycles, setAccumulationCycles] = useState<AccumulationCycle[]>([]);
   const [accumulatedCoin, setAccumulatedCoin] = useState(0);
   const [accumulationShare, setAccumulationShare] = useState('10');
+  const [managedHoldings, setManagedHoldings] = useState<AssetSmartAutoSeed[]>(initialHoldings);
 
   const stopRef = useRef(false);
   const scanCountRef = useRef(0);
@@ -144,7 +147,8 @@ export const TradeScreen: React.FC<Props> = ({
   useEffect(() => {
     if (!smartRunning && initialSymbol) setSymbol(initialSymbol.toUpperCase());
     if (initialHolding && !smartRunning) setSmartEnabled(true);
-  }, [initialHolding, initialSymbol, smartRunning]);
+    setManagedHoldings(initialHoldings);
+  }, [initialHolding, initialHoldings, initialSymbol, smartRunning]);
 
   useEffect(() => {
     const value = toNumber(amount);
@@ -174,6 +178,11 @@ export const TradeScreen: React.FC<Props> = ({
     const timer = setInterval(() => void refresh(), 3000);
     return () => { mounted = false; clearInterval(timer); };
   }, [symbol]);
+
+  const switchManagedHolding = (holding: AssetSmartAutoSeed) => {
+    setSymbol(holding.symbol.toUpperCase());
+    setSmartEnabled(true);
+  };
 
   const filteredPairs = useMemo(() => {
     const query = pairSearch.trim().toUpperCase();
