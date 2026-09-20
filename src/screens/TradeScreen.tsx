@@ -403,7 +403,8 @@ export const TradeScreen: React.FC<Props> = ({
       const fill = await waitForSpotFill(credentials, ack.orderId);
       const baseCoin = candidate.market.symbol.replace(/USDT$/, '');
       const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
-      const buyFeeUsdt = fill.feeByCurrency.USDT || 0;\n      const buyFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
+      const buyFeeUsdt = fill.feeByCurrency.USDT || 0;
+      const buyFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
       const position: TrackedPosition = {
         id: ack.orderId,
         symbol: candidate.market.symbol,
@@ -579,7 +580,9 @@ export const TradeScreen: React.FC<Props> = ({
       const existing = livePositionsRef.current.find((item) => item.symbol === cycle.symbol && item.fromPortfolio);
       if (existing) {
         const nextQty = existing.qty + boughtQty;
-        const buyFeeUsdt = fill.feeByCurrency.USDT || 0;\n        const buyFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);\n        const nextCost = existing.costUsdt + fill.quoteValue + buyFeeUsdt + buyFeeBaseUsdt;
+        const buyFeeUsdt = fill.feeByCurrency.USDT || 0;
+        const buyFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
+        const nextCost = existing.costUsdt + fill.quoteValue + buyFeeUsdt + buyFeeBaseUsdt;
         const nextEntry = nextQty > 0 ? nextCost / nextQty : existing.entryPrice;
         livePositionsRef.current = livePositionsRef.current.map((item) => item.id === existing.id ? {
           ...item,
@@ -888,7 +891,8 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
             </View>}
 
-            <Text style={styles.feeInfo}>Spot MNT: Maker {SPOT_MAKER_FEE_PCT.toFixed(3)}% • Taker {SPOT_TAKER_FEE_PCT.toFixed(3)}% • Market BUY+SELL ≈ {MARKET_ROUND_TRIP_FEE_PCT.toFixed(3)}% + spread/slippage. Po fill bot używa rzeczywistego execFee z Bybit.</Text>\n            {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
+            <Text style={styles.feeInfo}>Spot MNT: Maker {SPOT_MAKER_FEE_PCT.toFixed(3)}% • Taker {SPOT_TAKER_FEE_PCT.toFixed(3)}% • Market BUY+SELL ≈ {MARKET_ROUND_TRIP_FEE_PCT.toFixed(3)}% + spread/slippage. Po fill bot używa rzeczywistego execFee z Bybit.</Text>
+            {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
             {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
@@ -966,7 +970,8 @@ const styles = StyleSheet.create({
   accCard: { backgroundColor: '#20251A', borderWidth: 1, borderColor: '#65A30D', borderRadius: 10, padding: 10, marginTop: 12 },
   accTitle: { color: '#A3E635', fontSize: 11, fontWeight: '900' },
   accLine: { color: '#D4D4D8', fontSize: 10, lineHeight: 15, marginTop: 4 },
-  feeInfo: { color: '#A3E635', fontSize: 10, lineHeight: 15, marginTop: 10 },\n  scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
+  feeInfo: { color: '#A3E635', fontSize: 10, lineHeight: 15, marginTop: 10 },
+  scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
   candidate: { color: '#22C55E', fontSize: 11, lineHeight: 16, marginTop: 7 },
   status: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   smartButton: { backgroundColor: '#F0B90B', padding: 14, borderRadius: 10, alignItems: 'center' },
