@@ -481,8 +481,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       const configuredShare = Math.min(1, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
       const maxByShare = position.qty * configuredShare;
-      const maxByTrade = trade / sellPrice;
-      const qty = Math.min(maxByShare, maxByTrade);
+      const qty = maxByShare;
       const estimatedQuote = qty * sellPrice;
       if (qty <= 0 || estimatedQuote < SMART_MIN_TRADE_USDT) continue;
 
@@ -548,7 +547,7 @@ export const TradeScreen: React.FC<Props> = ({
     const firstAsk = first.ask > 0 ? first.ask : first.lastPrice;
     const minBoughtQty = cycle.soldQty * (1 + ACCUMULATION_MIN_COIN_GAIN_PCT / 100);
     const conservativeBoughtQty = firstAsk > 0
-      ? (Math.min(cycle.soldQuoteUsdt, maxOrderUsdt) / firstAsk) * (1 - REBUY_COST_BUFFER_PCT / 100)
+      ? (cycle.soldQuoteUsdt / firstAsk) * (1 - REBUY_COST_BUFFER_PCT / 100)
       : 0;
     if (firstAsk <= 0 || firstAsk > cycle.targetBuyPrice || conservativeBoughtQty <= minBoughtQty) {
       setSmartStatus(`SMART ACCUMULATION ${cycle.symbol}: po SELL czekam na dołek. Teraz ${priceText(firstAsk)}, cel ≤ ${priceText(cycle.targetBuyPrice)}.`);
@@ -566,8 +565,8 @@ export const TradeScreen: React.FC<Props> = ({
     sellBusyRef.current = true;
     setBusy(true);
     try {
-      const spend = Math.min(cycle.soldQuoteUsdt, maxOrderUsdt);
-      const ack = await placeSpotMarketOrder(credentials, cycle.symbol, 'Buy', spend, maxOrderUsdt);
+      const spend = cycle.soldQuoteUsdt;
+      const ack = await placeSpotMarketOrder(credentials, cycle.symbol, 'Buy', spend, Math.max(maxOrderUsdt, spend));
       const fill = await waitForSpotFill(credentials, ack.orderId);
       const baseCoin = cycle.symbol.replace(/USDT$/, '');
       const boughtQty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
@@ -758,6 +757,14 @@ export const TradeScreen: React.FC<Props> = ({
               }
             }
 
+            // Smart Accumulation is independent from free USDT: every managed portfolio coin
+            // continuously gets its own HOLD -> SELL -> WAIT -> BUY BACK cycle.
+            const accumulationStarted = await tryStartAccumulation(trade);
+            if (accumulationStarted) {
+              await sleep(350);
+              continue;
+            }
+
             const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
             if (sellCandidate) {
               await executeAssistSell(sellCandidate);
@@ -770,14 +777,11 @@ export const TradeScreen: React.FC<Props> = ({
               const candidate = await scanBestCandidate();
               if (candidate && livePositionsRef.current.every((item) => item.symbol !== candidate.market.symbol)) await buyCandidate(candidate, trade, slots);
             } else if (free + 1e-8 < trade) {
-              const started = await tryStartAccumulation(trade);
-              if (!started) {
-                const managed = refreshed.filter((item) => item.fromPortfolio).length;
-                setSmartStatus(managed > 0
-                  ? `SMART ACCUMULATION: USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Monitoruję ${managed} pozycję/pozycje i czekam na bezpieczną lokalną górkę.`
-                  : `SMART AUTO: USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Brak pozycji z wiarygodną ceną zakupu do bezpiecznej rotacji.`);
-                await sleep(1500);
-              }
+              const managed = refreshed.filter((item) => item.fromPortfolio).length;
+              setSmartStatus(managed > 0
+                ? `SMART ACCUMULATION: monitoruję niezależnie ${managed} coinów. Wolne USDT ${free.toFixed(2)} nie blokuje ich cykli.`
+                : `SMART AUTO: USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Brak zarządzanych coinów do akumulacji.`);
+              await sleep(1000);
             } else {
               setSmartStatus(`SMART AUTO: ${refreshed.length}/${slots} slotów zajętych. Monitoruję pozycje.`);
               await sleep(1000);
