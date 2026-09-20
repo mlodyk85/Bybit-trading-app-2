@@ -145,10 +145,10 @@ export const TradeScreen: React.FC<Props> = ({
   const accumulatedCoinRef = useRef(0);
 
   useEffect(() => {
-    if (!smartRunning && initialSymbol) setSymbol(initialSymbol.toUpperCase());
+    if (!smartRunning && initialSymbol) { setSymbol(initialSymbol.toUpperCase()); onHoldingConsumed?.(); }
     if (initialHolding && !smartRunning) setSmartEnabled(true);
     setManagedHoldings(initialHoldings);
-  }, [initialHolding, initialHoldings, initialSymbol, smartRunning]);
+  }, [initialHolding, initialHoldings, initialSymbol, onHoldingConsumed, smartRunning]);
 
   useEffect(() => {
     const value = toNumber(amount);
@@ -843,17 +843,17 @@ export const TradeScreen: React.FC<Props> = ({
         <View style={styles.smartCard}>
           <View style={styles.smartHeader}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.smartTitle}>SMART AUTO</Text>
-              <Text style={styles.smartSub}>AUTO BUY • AUTO SELL • niezależne BUY • HOLD • SELL per coin</Text>
+              <Text style={styles.smartTitle}>HAPPY HOUR</Text>
+              <Text style={styles.smartSub}>Bot sam wybiera szybkie pary USDT • BUY • HOLD • SELL</Text>
             </View>
             <Switch value={smartEnabled} onValueChange={(value) => { if (!smartRunning) setSmartEnabled(value); }} disabled={smartRunning} />
           </View>
 
           {smartEnabled && <>
-            <Text style={styles.smartNotice}>Każdy coin ma niezależny cykl. Bot może jednocześnie czekać na odkup BTC i analizować lub handlować innymi parami. USDT ze sprzedaży w aktywnym cyklu jest rezerwowane wyłącznie na odkup tego coina.</Text>
+            <Text style={styles.smartNotice}>Dwa niezależne silniki: SMART ACCUMULATION obraca coinami, które już posiadasz, a HAPPY HOUR wykorzystuje wolne USDT i sam wybiera szybkie pary do handlu. Cykl jednego coina nie blokuje pozostałych.</Text>
 
             <View style={styles.modeRow}>
-              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>SMART AUTO</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
 
@@ -899,7 +899,7 @@ export const TradeScreen: React.FC<Props> = ({
 
             {smartRunning
               ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP SKANERA</Text></TouchableOpacity>
-              : <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START SMART AUTO' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR + ACCUMULATION' : 'START DEMO'}</Text></TouchableOpacity>}
           </>}
         </View>
 
