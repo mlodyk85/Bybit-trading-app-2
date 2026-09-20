@@ -888,7 +888,7 @@ export const TradeScreen: React.FC<Props> = ({
           </View>
 
           {smartEnabled && <>
-            <Text style={styles.smartNotice}>Dwa niezależne silniki: SMART ACCUMULATION obraca coinami, które już posiadasz, a HAPPY HOUR wykorzystuje wolne USDT i sam wybiera szybkie pary do handlu. Cykl jednego coina nie blokuje pozostałych.</Text>
+            <Text style={styles.smartNotice}>HAPPY HOUR działa niezależnie od ręcznie wybranej pary i portfela: skanuje rynek Spot/USDT, wybiera kandydatów i zarządza własnymi pozycjami. Ręczny Trade pozostaje zawsze dostępny.</Text>
 
             <View style={styles.modeRow}>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
@@ -915,8 +915,8 @@ export const TradeScreen: React.FC<Props> = ({
             </View>
 
             {smartMode === 'assist' && <View style={styles.accCard}>
-              <Text style={styles.accTitle}>SMART ACCUMULATION — POSIADANE COINY</Text>
-              <Text style={styles.smallLabel}>Udział każdego zarządzanego coina (%) — 100 = cała dostępna ilość</Text>
+              <Text style={styles.accTitle}>SMART — NIEZALEŻNE POZYCJE</Text>
+              <Text style={styles.smallLabel}>Udział pozycji zarządzanej przez Smart (%)</Text>
               <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Gotowy — ${managedHoldings.length || (initialHolding ? 1 : 0)} coinów zarządzanych niezależnie; wolne USDT nie blokuje akumulacji.`}</Text>
               <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
@@ -937,8 +937,8 @@ export const TradeScreen: React.FC<Props> = ({
             })}
 
             {smartRunning
-              ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP SKANERA</Text></TouchableOpacity>
-              : <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR + ACCUMULATION' : 'START DEMO'}</Text></TouchableOpacity>}
+              ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
+              : <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : 'START DEMO'}</Text></TouchableOpacity>}
           </>}
         </View>
 
