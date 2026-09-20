@@ -82,14 +82,14 @@ const MAX_SPREAD_PCT = 0.20;
 const AUTO_SELL_PROFIT_PCT = 0.35;
 const AUTO_SELL_MIN_NET_USDT = 0.01;
 const AUTO_SELL_MIN_NET_PCT = 0.08;
-const EXIT_COST_BUFFER_PCT = 0.18;
+const SPOT_MAKER_FEE_PCT = 0.075;\nconst SPOT_TAKER_FEE_PCT = 0.075;\nconst MARKET_ROUND_TRIP_FEE_PCT = SPOT_TAKER_FEE_PCT * 2;\nconst SLIPPAGE_SAFETY_PCT = 0.04;\nconst EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const SMART_MIN_TRADE_USDT = 10;
 const ACCUMULATION_DEFAULT_SHARE = 0.10;
 const ACCUMULATION_MIN_PROFIT_PCT = 0.45;
 const ACCUMULATION_PEAK_PULLBACK_PCT = 0.08;
 const ACCUMULATION_REBUY_DROP_PCT = 0.45;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.03;
-const REBUY_COST_BUFFER_PCT = 0.18;
+const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 
 export const TradeScreen: React.FC<Props> = ({
   credentials,
@@ -110,7 +110,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [pairsLoading, setPairsLoading] = useState(true);
   const [market, setMarket] = useState<SpotMarketSnapshot | null>(null);
 
-  const [smartEnabled, setSmartEnabled] = useState(Boolean(initialHolding));
+  const [smartEnabled, setSmartEnabled] = useState(Boolean(initialHolding) || initialHoldings.length > 0);
   const [smartMode, setSmartMode] = useState<SmartMode>('assist');
   const [smartRunning, setSmartRunning] = useState(false);
   const [targetProfit, setTargetProfit] = useState('0');
@@ -399,12 +399,12 @@ export const TradeScreen: React.FC<Props> = ({
       const fill = await waitForSpotFill(credentials, ack.orderId);
       const baseCoin = candidate.market.symbol.replace(/USDT$/, '');
       const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
-      const buyFeeUsdt = fill.feeByCurrency.USDT || 0;
+      const buyFeeUsdt = fill.feeByCurrency.USDT || 0;\n      const buyFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
       const position: TrackedPosition = {
         id: ack.orderId,
         symbol: candidate.market.symbol,
         qty,
-        costUsdt: fill.quoteValue + buyFeeUsdt,
+        costUsdt: fill.quoteValue + buyFeeUsdt + buyFeeBaseUsdt,
         entryPrice: fill.avgPrice,
         peakMovePct: 0,
         currentMovePct: 0,
@@ -413,7 +413,7 @@ export const TradeScreen: React.FC<Props> = ({
       };
       livePositionsRef.current = [...livePositionsRef.current, position];
       setLivePositions([...livePositionsRef.current]);
-      setSmartStatus(`AUTO BUY ${position.symbol}: ${trade.toFixed(2)} USDT. AUTO SELL przy +${AUTO_SELL_PROFIT_PCT.toFixed(2)}%.`);
+      setSmartStatus(`HAPPY HOUR BUY ${position.symbol}: ${trade.toFixed(2)} USDT. Wyjście tylko po dodatnim NET po rzeczywistym fee.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd BUY.';
@@ -575,7 +575,7 @@ export const TradeScreen: React.FC<Props> = ({
       const existing = livePositionsRef.current.find((item) => item.symbol === cycle.symbol && item.fromPortfolio);
       if (existing) {
         const nextQty = existing.qty + boughtQty;
-        const nextCost = existing.costUsdt + fill.quoteValue;
+        const buyFeeUsdt = fill.feeByCurrency.USDT || 0;\n        const buyFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);\n        const nextCost = existing.costUsdt + fill.quoteValue + buyFeeUsdt + buyFeeBaseUsdt;
         const nextEntry = nextQty > 0 ? nextCost / nextQty : existing.entryPrice;
         livePositionsRef.current = livePositionsRef.current.map((item) => item.id === existing.id ? {
           ...item,
@@ -592,7 +592,7 @@ export const TradeScreen: React.FC<Props> = ({
           id: `acc-${cycle.symbol}-${Date.now()}`,
           symbol: cycle.symbol,
           qty: boughtQty,
-          costUsdt: fill.quoteValue,
+          costUsdt: fill.quoteValue + (fill.feeByCurrency.USDT || 0) + ((fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0)),
           entryPrice: fill.avgPrice,
           peakMovePct: 0,
           currentMovePct: 0,
@@ -877,14 +877,14 @@ export const TradeScreen: React.FC<Props> = ({
             </View>
 
             {smartMode === 'assist' && <View style={styles.accCard}>
-              <Text style={styles.accTitle}>SMART ACCUMULATION</Text>
-              <Text style={styles.smallLabel}>Kapitał roboczy coina (%) — domyślnie 10%</Text>
+              <Text style={styles.accTitle}>SMART ACCUMULATION — POSIADANE COINY</Text>
+              <Text style={styles.smallLabel}>Udział każdego zarządzanego coina (%) — 100 = cała dostępna ilość</Text>
               <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Gotowy — ${managedHoldings.length || (initialHolding ? 1 : 0)} coinów zarządzanych niezależnie; wolne USDT nie blokuje akumulacji.`}</Text>
               <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
             </View>}
 
-            {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
+            <Text style={styles.feeInfo}>Spot MNT: Maker {SPOT_MAKER_FEE_PCT.toFixed(3)}% • Taker {SPOT_TAKER_FEE_PCT.toFixed(3)}% • Market BUY+SELL ≈ {MARKET_ROUND_TRIP_FEE_PCT.toFixed(3)}% + spread/slippage. Po fill bot używa rzeczywistego execFee z Bybit.</Text>\n            {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
             {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
@@ -962,7 +962,7 @@ const styles = StyleSheet.create({
   accCard: { backgroundColor: '#20251A', borderWidth: 1, borderColor: '#65A30D', borderRadius: 10, padding: 10, marginTop: 12 },
   accTitle: { color: '#A3E635', fontSize: 11, fontWeight: '900' },
   accLine: { color: '#D4D4D8', fontSize: 10, lineHeight: 15, marginTop: 4 },
-  scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
+  feeInfo: { color: '#A3E635', fontSize: 10, lineHeight: 15, marginTop: 10 },\n  scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
   candidate: { color: '#22C55E', fontSize: 11, lineHeight: 16, marginTop: 7 },
   status: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   smartButton: { backgroundColor: '#F0B90B', padding: 14, borderRadius: 10, alignItems: 'center' },
