@@ -116,7 +116,9 @@ export const TradeScreen: React.FC<Props> = ({
 
   const [smartEnabled, setSmartEnabled] = useState(Boolean(initialHolding) || initialHoldings.length > 0);
   const [smartMode, setSmartMode] = useState<SmartMode>('assist');
-  const [smartRunning, setSmartRunning] = useState(false);
+  const [smartRunning, setSmartRunning] = useState(false); // Happy Hour engine
+  const [accumulationRunning, setAccumulationRunning] = useState(false); // Smart engine
+  const [accumulationStatus, setAccumulationStatus] = useState('Gotowy');
   const [targetProfit, setTargetProfit] = useState('0');
   const [maxLoss, setMaxLoss] = useState('2');
   const [maxCycles, setMaxCycles] = useState('1000');
@@ -137,7 +139,8 @@ export const TradeScreen: React.FC<Props> = ({
   const [accumulationShare, setAccumulationShare] = useState('10');
   const [managedHoldings, setManagedHoldings] = useState<AssetSmartAutoSeed[]>(initialHoldings);
 
-  const stopRef = useRef(false);
+  const stopRef = useRef(false); // Happy Hour stop
+  const accumulationStopRef = useRef(false); // Smart stop
   const scanCountRef = useRef(0);
   const shadowPositionsRef = useRef<TrackedPosition[]>([]);
   const livePositionsRef = useRef<TrackedPosition[]>([]);
@@ -157,33 +160,7 @@ export const TradeScreen: React.FC<Props> = ({
     if (initialHolding) setSmartEnabled(true);
     setManagedHoldings(initialHoldings);
 
-    // When another portfolio coin is enabled while the scanner is already running,
-    // attach it as its own independent tracked position instead of ignoring it until restart.
-    if (smartRunning && smartMode === 'assist') {
-      let changed = false;
-      const next = [...livePositionsRef.current];
-      for (const holding of initialHoldings) {
-        if (next.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
-        next.push({
-          id: `portfolio-${holding.symbol}-${Date.now()}`,
-          symbol: holding.symbol,
-          qty: holding.baseQty,
-          costUsdt: holding.buyCostUsdt,
-          entryPrice: holding.buyPrice,
-          peakMovePct: 0,
-          currentMovePct: 0,
-          currentPnlUsdt: 0,
-          sellReady: false,
-          fromPortfolio: true,
-        });
-        changed = true;
-      }
-      if (changed) {
-        livePositionsRef.current = next;
-        setLivePositions([...next]);
-      }
-    }
-  }, [initialHolding, initialHoldings, initialSymbol, onHoldingConsumed, smartMode, smartRunning]);
+  }, [initialHolding, initialHoldings, initialSymbol, onHoldingConsumed]);
 
   useEffect(() => {
     const value = toNumber(amount);
@@ -665,6 +642,69 @@ export const TradeScreen: React.FC<Props> = ({
     }
   };
 
+  const startAccumulationEngine = () => {
+    if (accumulationRunning) return;
+    const portfolioSeeds = managedHoldings.length > 0 ? managedHoldings : (initialHolding ? [initialHolding] : []);
+    if (portfolioSeeds.length === 0) {
+      setAccumulationStatus('Brak coinów wybranych do Smart.');
+      return;
+    }
+
+    for (const holding of portfolioSeeds) {
+      if (livePositionsRef.current.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
+      livePositionsRef.current = [...livePositionsRef.current, {
+        id: `portfolio-${holding.symbol}-${Date.now()}`,
+        symbol: holding.symbol,
+        qty: holding.baseQty,
+        costUsdt: holding.buyCostUsdt,
+        entryPrice: holding.buyPrice,
+        peakMovePct: 0,
+        currentMovePct: 0,
+        currentPnlUsdt: 0,
+        sellReady: false,
+        fromPortfolio: true,
+      }];
+    }
+    setLivePositions([...livePositionsRef.current]);
+    accumulationStopRef.current = false;
+    setAccumulationRunning(true);
+    setAccumulationStatus(`SMART uruchomiony niezależnie dla ${portfolioSeeds.length} coinów.`);
+
+    void (async () => {
+      while (!accumulationStopRef.current) {
+        try {
+          const happyOwned = livePositionsRef.current.filter((position) => !position.fromPortfolio);
+          const smartOwned: TrackedPosition[] = [];
+          for (const position of livePositionsRef.current.filter((item) => item.fromPortfolio)) {
+            try { smartOwned.push(await updateTrackedPosition(position)); }
+            catch { smartOwned.push(position); }
+          }
+          livePositionsRef.current = [...happyOwned, ...smartOwned];
+          setLivePositions([...livePositionsRef.current]);
+
+          for (const activeCycle of Array.from(accumulationRef.current.values())) {
+            if (accumulationStopRef.current) break;
+            await tryFinishAccumulation(activeCycle.symbol);
+          }
+          if (!accumulationStopRef.current) await tryStartAccumulation();
+          setAccumulationStatus(`SMART: monitoruję ${smartOwned.length} niezależnych pozycji • aktywne cykle ${accumulationRef.current.size}.`);
+          await sleep(900);
+        } catch (e: unknown) {
+          setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
+          await sleep(3000);
+        }
+      }
+      setAccumulationRunning(false);
+      accumulationStopRef.current = false;
+      setAccumulationStatus('SMART zatrzymany. Happy Hour działa niezależnie.');
+    })();
+  };
+
+  const stopAccumulationEngine = () => {
+    accumulationStopRef.current = true;
+    setAccumulationStatus('SMART: zatrzymuję własny silnik...');
+  };
+
   const startSmart = () => {
     const trade = toNumber(amount);
     const target = toNumber(targetProfit);
@@ -702,25 +742,8 @@ export const TradeScreen: React.FC<Props> = ({
       setShadowUsdt(virtualCapital);
       setShadowPositions([]);
     } else {
+      // Happy Hour owns only positions opened by Happy Hour. Portfolio/Smart positions are a separate engine.
       void refreshAvailableUsdt();
-      const portfolioSeeds = managedHoldings.length > 0 ? managedHoldings : (initialHolding ? [initialHolding] : []);
-      for (const holding of portfolioSeeds) {
-        if (livePositionsRef.current.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
-        const seed: TrackedPosition = {
-          id: `portfolio-${holding.symbol}-${Date.now()}`,
-          symbol: holding.symbol,
-          qty: holding.baseQty,
-          costUsdt: holding.buyCostUsdt,
-          entryPrice: holding.buyPrice,
-          peakMovePct: 0,
-          currentMovePct: 0,
-          currentPnlUsdt: 0,
-          sellReady: false,
-          fromPortfolio: true,
-        };
-        livePositionsRef.current = [...livePositionsRef.current, seed];
-      }
-      setLivePositions([...livePositionsRef.current]);
     }
 
     void (async () => {
@@ -780,28 +803,14 @@ export const TradeScreen: React.FC<Props> = ({
               await sleep(1600);
             }
           } else {
+            const smartOwned = livePositionsRef.current.filter((position) => position.fromPortfolio);
             const refreshed: TrackedPosition[] = [];
-            for (const position of livePositionsRef.current) {
+            for (const position of livePositionsRef.current.filter((item) => !item.fromPortfolio)) {
               try { refreshed.push(await updateTrackedPosition(position)); }
               catch { refreshed.push(position); }
             }
-            livePositionsRef.current = refreshed;
-            setLivePositions([...refreshed]);
-
-            if (accumulationRef.current.size > 0) {
-              for (const activeCycle of Array.from(accumulationRef.current.values())) {
-                if (stopRef.current) break;
-                await tryFinishAccumulation(activeCycle.symbol);
-              }
-            }
-
-            // Smart Accumulation is independent from free USDT: every managed portfolio coin
-            // continuously gets its own HOLD -> SELL -> WAIT -> BUY BACK cycle.
-            const accumulationStarted = await tryStartAccumulation();
-            if (accumulationStarted) {
-              await sleep(350);
-              continue;
-            }
+            livePositionsRef.current = [...smartOwned, ...refreshed];
+            setLivePositions([...livePositionsRef.current]);
 
             const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
             if (sellCandidate) {
@@ -815,13 +824,10 @@ export const TradeScreen: React.FC<Props> = ({
               const candidate = await scanBestCandidate();
               if (candidate && livePositionsRef.current.every((item) => item.symbol !== candidate.market.symbol)) await buyCandidate(candidate, trade, slots);
             } else if (free + 1e-8 < trade) {
-              const managed = refreshed.filter((item) => item.fromPortfolio).length;
-              setSmartStatus(managed > 0
-                ? `SMART ACCUMULATION: monitoruję niezależnie ${managed} coinów. Wolne USDT ${free.toFixed(2)} nie blokuje ich cykli.`
-                : `SMART AUTO: USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Brak zarządzanych coinów do akumulacji.`);
+              setSmartStatus(`HAPPY HOUR: wolne USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Czekam bez używania kapitału Smart.`);
               await sleep(1000);
             } else {
-              setSmartStatus(`SMART AUTO: ${refreshed.length}/${slots} slotów zajętych. Monitoruję pozycje.`);
+              setSmartStatus(`HAPPY HOUR: ${refreshed.length}/${slots} slotów zajętych. Monitoruję własne pozycje.`);
               await sleep(1000);
             }
           }
@@ -842,7 +848,8 @@ export const TradeScreen: React.FC<Props> = ({
     })();
   };
 
-  const positionsToRender = smartMode === 'shadow' ? shadowPositions : livePositions;
+  const positionsToRender = smartMode === 'shadow' ? shadowPositions : livePositions.filter((position) => !position.fromPortfolio);
+  const smartPositionsToRender = livePositions.filter((position) => position.fromPortfolio);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -914,14 +921,6 @@ export const TradeScreen: React.FC<Props> = ({
               {smartMode === 'shadow' && <Text style={styles.stat}>USDT {shadowUsdt.toFixed(2)}</Text>}
             </View>
 
-            {smartMode === 'assist' && <View style={styles.accCard}>
-              <Text style={styles.accTitle}>SMART — NIEZALEŻNE POZYCJE</Text>
-              <Text style={styles.smallLabel}>Udział pozycji zarządzanej przez Smart (%)</Text>
-              <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Gotowy — ${managedHoldings.length || (initialHolding ? 1 : 0)} coinów zarządzanych niezależnie; wolne USDT nie blokuje akumulacji.`}</Text>
-              <Text style={styles.accLine}>Zmiana ilości coina z zakończonych cykli: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
-            </View>}
-
             <Text style={styles.feeInfo}>Spot MNT: Maker {SPOT_MAKER_FEE_PCT.toFixed(3)}% • Taker {SPOT_TAKER_FEE_PCT.toFixed(3)}% • Market BUY+SELL ≈ {MARKET_ROUND_TRIP_FEE_PCT.toFixed(3)}% + spread/slippage. Po fill bot używa rzeczywistego execFee z Bybit.</Text>
             {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
             {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
@@ -940,6 +939,29 @@ export const TradeScreen: React.FC<Props> = ({
               ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
               : <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : 'START DEMO'}</Text></TouchableOpacity>}
           </>}
+        </View>
+
+        <View style={styles.smartCard}>
+          <View style={styles.smartHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.smartTitle}>SMART</Text>
+              <Text style={styles.smartSub}>Oddzielny silnik • własne pozycje • nie uruchamia i nie zatrzymuje Happy Hour</Text>
+            </View>
+          </View>
+          <Text style={styles.smartNotice}>SMART działa niezależnie od Happy Hour i ręcznie wybranej pary. Każdy zarządzany coin ma własny cykl.</Text>
+          <Text style={styles.smallLabel}>Udział pozycji zarządzanej przez Smart (%)</Text>
+          <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
+          <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Wybrane do Smart: ${managedHoldings.length || (initialHolding ? 1 : 0)}`}</Text>
+          <Text style={styles.accLine}>Zmiana ilości coina: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
+          <Text style={styles.status}>{accumulationStatus}</Text>
+          {smartPositionsToRender.map((position) => <View key={position.id} style={styles.positionCard}><View style={{ flex: 1 }}>
+            <Text style={styles.positionSymbol}>{position.symbol} • SMART</Text>
+            <Text style={styles.positionLine}>wejście {priceText(position.entryPrice)} • ruch {position.currentMovePct >= 0 ? '+' : ''}{position.currentMovePct.toFixed(4)}%</Text>
+            <Text style={styles.positionLine}>est. NET PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
+          </View></View>)}
+          {accumulationRunning
+            ? <TouchableOpacity style={styles.stopButton} onPress={stopAccumulationEngine}><Text style={styles.buttonText}>STOP SMART</Text></TouchableOpacity>
+            : <TouchableOpacity style={styles.smartButton} onPress={startAccumulationEngine}><Text style={styles.smartButtonText}>START SMART</Text></TouchableOpacity>}
         </View>
 
         {lastAck && <View style={styles.card}><Text style={styles.cardTitle}>Ostatnie zlecenie</Text><Text style={styles.line}>{lastAck.side} {lastAck.symbol} • {lastAck.quoteAmountUsdt.toFixed(2)} USDT</Text><Text style={styles.line}>Order ID: {lastAck.orderId}</Text></View>}
