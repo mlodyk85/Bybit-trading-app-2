@@ -17,7 +17,6 @@
     "crypto-es": "^2.1.0",
     "expo": "~51.0.38",
     "expo-secure-store": "~13.0.2",
-    "expo-local-authentication": "~14.0.1",
     "expo-status-bar": "~1.12.1",
     "react": "18.2.0",
     "react-native": "0.74.5",
