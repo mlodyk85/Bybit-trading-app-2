@@ -14,6 +14,7 @@ import {
   View,
 } from 'react-native';
 import { AssetSmartAutoSeed } from '../components/AssetRow';
+import { recordEngineError, recordOrder, recordReject, recordScan, setEngineEnabled } from '../services/tradingEngineState';
 import { ApiCredentials, TradeAck } from '../api/types';
 import {
   fetchSpotMarketSnapshot,
@@ -315,6 +316,7 @@ export const TradeScreen: React.FC<Props> = ({
 
   const stopSmart = () => {
     stopRef.current = true;
+    void setEngineEnabled('happy-hour', false);
     setSmartStatus('STOP: kończę skanowanie. Otwarte pozycje SMART AUTO pozostają bez zmian.');
   };
 
@@ -384,6 +386,8 @@ export const TradeScreen: React.FC<Props> = ({
     } else {
       setScanInfo('BRAK WEJŚCIA • za mało danych');
     }
+    await recordScan('happy-hour', ranked.length, best ? `Kandydat ${best.market.symbol} score ${best.score.toFixed(2)}` : (bestObserved ? `Brak wejścia; obserwowany ${bestObserved.symbol} ${bestObserved.momentum.toFixed(4)}%` : 'Brak danych do wejścia'));
+    if (!best) await recordReject('happy-hour', scanInfo || 'Brak kandydata spełniającego warunki wejścia');
     return best;
   };
 
@@ -433,11 +437,13 @@ export const TradeScreen: React.FC<Props> = ({
       livePositionsRef.current = [...livePositionsRef.current, position];
       setLivePositions([...livePositionsRef.current]);
       setSmartStatus(`HAPPY HOUR BUY ${position.symbol}: ${trade.toFixed(2)} USDT. Wyjście tylko po dodatnim NET po rzeczywistym fee.`);
+      await recordOrder('happy-hour', 'Buy', `BUY ${position.symbol} ${trade.toFixed(2)} USDT`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd BUY.';
       setError(message);
       setSmartStatus(`AUTO BUY nieudany: ${message}. Skaner działa dalej.`);
+      await recordEngineError('happy-hour', message);
     } finally {
       setBusy(false);
     }
@@ -467,6 +473,7 @@ export const TradeScreen: React.FC<Props> = ({
         setCycleCount(cycleCountRef.current);
         setSessionProfit(sessionProfitRef.current);
         setSmartStatus(`AUTO SELL ${position.symbol} • NETTO +${pnl.toFixed(4)} USDT po fee. Skaner działa dalej.`);
+        await recordOrder('happy-hour', 'Sell', `SELL ${position.symbol} NET +${pnl.toFixed(4)} USDT`);
       } else {
         // Market fills can move between quote and execution. Do not count a non-positive fill as a successful cycle.
         sessionProfitRef.current += pnl;
@@ -478,6 +485,7 @@ export const TradeScreen: React.FC<Props> = ({
       const message = e instanceof Error ? e.message : 'Błąd SELL.';
       setError(message);
       setSmartStatus(`AUTO SELL nieudany: ${message}. Skaner nadal monitoruje pozycję.`);
+      await recordEngineError('happy-hour', message);
     } finally {
       sellBusyRef.current = false;
       setBusy(false);
@@ -712,6 +720,7 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const startSmart = () => {
+    void setEngineEnabled('happy-hour', true);
     const trade = toNumber(amount);
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
