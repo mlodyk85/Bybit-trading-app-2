@@ -74,10 +74,10 @@ const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
 const SCAN_SAMPLES = 7;
 const SCAN_INTERVAL_MS = 1400;
-const BUY_DIP_MIN_PCT = -0.30;
+const BUY_DIP_MIN_PCT = -0.12;
 const BUY_DIP_MAX_PCT = -2.50;
-const BUY_REVERSAL_PCT = 0.05;
-const MAX_SPREAD_PCT = 0.20;
+const BUY_REVERSAL_PCT = 0.025;
+const MAX_SPREAD_PCT = 0.16;
 // Safety-first thresholds. The bot never intentionally triggers a SELL at break-even.
 const AUTO_SELL_PROFIT_PCT = 0.35;
 const AUTO_SELL_MIN_NET_USDT = 0.01;
@@ -353,14 +353,22 @@ export const TradeScreen: React.FC<Props> = ({
       if (!bestObserved || windowMomentumPct < bestObserved.momentum) bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
 
       const isCore = CORE_SYMBOLS.has(now.symbol);
-      // BUY only after a real dip: the wider window must still be negative,
-      // while the short window confirms that price has started reversing upward.
-      if (windowMomentumPct > BUY_DIP_MIN_PCT || windowMomentumPct < BUY_DIP_MAX_PCT) continue;
-      if (shortMomentumPct < BUY_REVERSAL_PCT || now.spreadPct > MAX_SPREAD_PCT) continue;
+      // Two valid entry shapes:
+      // 1) dip + confirmed rebound, 2) liquid momentum continuation.
+      // This avoids a scanner that can run all night waiting for one exact -0.30% pattern.
+      if (now.spreadPct > MAX_SPREAD_PCT) continue;
+      const dipReversal = windowMomentumPct <= BUY_DIP_MIN_PCT
+        && windowMomentumPct >= BUY_DIP_MAX_PCT
+        && shortMomentumPct >= BUY_REVERSAL_PCT;
+      const momentumContinuation = windowMomentumPct >= 0.08
+        && windowMomentumPct <= 0.85
+        && shortMomentumPct >= 0.035
+        && isCore;
+      if (!dipReversal && !momentumContinuation) continue;
 
       const liquidityScore = Math.max(0, Math.log10(Math.max(now.turnover24h, 1)) - 5);
       const coreQualityBonus = isCore ? 18 : 0;
-      const dipDepth = Math.abs(windowMomentumPct);
+      const dipDepth = Math.abs(Math.min(0, windowMomentumPct));
       const score = dipDepth * 180 + shortMomentumPct * 520 + liquidityScore * 2.2 + coreQualityBonus - now.spreadPct * 70;
       ranked.push({ market: now, windowMomentumPct, shortMomentumPct, score });
     }
@@ -372,7 +380,7 @@ export const TradeScreen: React.FC<Props> = ({
       const quality = CORE_SYMBOLS.has(best.market.symbol) ? 'CORE' : 'ALT';
       setScanInfo(`DOŁEK ${best.market.symbol} • ${quality} • spadek ${best.windowMomentumPct.toFixed(4)}% • odbicie +${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
     } else if (bestObserved) {
-      setScanInfo(`BRAK DOŁKA • ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • BUY wymaga spadku ≤ ${BUY_DIP_MIN_PCT.toFixed(2)}% i potwierdzonego odbicia`);
+      setScanInfo(`BRAK WEJŚCIA • ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • czekam na odbicie po spadku albo potwierdzony momentum`);
     } else {
       setScanInfo('BRAK WEJŚCIA • za mało danych');
     }
@@ -394,14 +402,12 @@ export const TradeScreen: React.FC<Props> = ({
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
     if (!candidate || stopRef.current || smartMode !== 'assist') return;
-    if (livePositionsRef.current.length >= slots) return;
+    if (livePositionsRef.current.filter((item) => !item.fromPortfolio).length >= slots) return;
 
     setBusy(true);
     setError('');
     try {
-      const walletFree = await refreshAvailableUsdt();
-            const reservedUsdt = Array.from(accumulationRef.current.values()).reduce((sum, item) => sum + item.soldQuoteUsdt, 0);
-            const free = Math.max(0, walletFree - reservedUsdt);
+      const free = await refreshAvailableUsdt();
       if (free + 1e-8 < trade) {
         setSmartStatus(`Za mało wolnych USDT (${free.toFixed(2)}). Skaner działa dalej.`);
         return;
