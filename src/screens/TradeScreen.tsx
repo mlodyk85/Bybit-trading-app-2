@@ -173,7 +173,7 @@ export const TradeScreen: React.FC<Props> = ({
       .then((list) => { if (mounted && list.length) setPairs(list); })
       .catch(() => undefined)
       .finally(() => { if (mounted) setPairsLoading(false); });
-    return () => { mounted = false; stopRef.current = true; };
+    return () => { mounted = false; };
   }, []);
 
   useEffect(() => {
@@ -772,9 +772,17 @@ export const TradeScreen: React.FC<Props> = ({
             setCycleCount(cycleCountRef.current);
             setSessionProfit(sessionProfitRef.current);
 
-            if (cycleCountRef.current >= cycles && sessionProfitRef.current >= 0 && refreshed.length === 0) break;
-            if (target > 0 && sessionProfitRef.current >= target && refreshed.length === 0) break;
-            if (sessionProfitRef.current <= -loss) break;
+            // Continuous mode: session thresholds are telemetry/risk signals, not an automatic shutdown.
+            // Keep scanning until the user explicitly stops the engine.
+            if (cycleCountRef.current >= cycles && sessionProfitRef.current >= 0 && refreshed.length === 0) {
+              setSmartStatus(`DEMO: wykonano ${cycleCountRef.current} cykli; pracuję dalej.`);
+            }
+            if (target > 0 && sessionProfitRef.current >= target && refreshed.length === 0) {
+              setSmartStatus(`DEMO: cel +${target.toFixed(2)} USDT osiągnięty; pracuję dalej.`);
+            }
+            if (sessionProfitRef.current <= -loss) {
+              setSmartStatus(`DEMO: próg straty ${sessionProfitRef.current.toFixed(4)} USDT; skaner pozostaje aktywny.`);
+            }
 
             if (refreshed.length < slots && shadowUsdtRef.current >= trade) {
               const candidate = await scanBestCandidate();
@@ -841,10 +849,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       setSmartRunning(false);
       stopRef.current = false;
-      if (cycleCountRef.current >= cycles && sessionProfitRef.current >= 0) setSmartStatus(`Min. ${cycles} cykli wykonane: ${sessionProfitRef.current >= 0 ? '+' : ''}${sessionProfitRef.current.toFixed(4)} USDT.`);
-      else if (target > 0 && sessionProfitRef.current >= target) setSmartStatus(`Cel sesji osiągnięty: +${sessionProfitRef.current.toFixed(4)} USDT.`);
-      else if (sessionProfitRef.current <= -loss) setSmartStatus(`Max strata sesji: ${sessionProfitRef.current.toFixed(4)} USDT.`);
-      else setSmartStatus('Skaner zatrzymany ręcznie.');
+      setSmartStatus('Happy Hour zatrzymany ręcznie.');
     })();
   };
 
