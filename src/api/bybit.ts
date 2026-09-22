@@ -291,6 +291,12 @@ async function fetchSpotInstrument(symbolInput: string): Promise<SpotInstrument>
   return instrument;
 }
 
+export async function fetchSpotMinOrderAmt(symbolInput: string): Promise<number> {
+  const instrument = await fetchSpotInstrument(symbolInput);
+  const minOrderAmt = Number(instrument.lotSizeFilter?.minOrderAmt || '0');
+  return Number.isFinite(minOrderAmt) && minOrderAmt > 0 ? minOrderAmt : 0;
+}
+
 export async function fetchWalletBalance(credentials: ApiCredentials): Promise<WalletAccountResult | null> {
   const result = await bybitGet<WalletBalanceResult>('/v5/account/wallet-balance', { accountType: 'UNIFIED' }, credentials);
   return result?.list?.[0] || null;
