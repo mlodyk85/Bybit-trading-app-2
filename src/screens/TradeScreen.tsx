@@ -765,6 +765,37 @@ export const TradeScreen: React.FC<Props> = ({
     return seeds;
   };
 
+  const protectPortfolioPositionWithLimitSell = async (position: TrackedPosition): Promise<TrackedPosition> => {
+    if (position.exitOrderId || position.qty <= 0 || position.costUsdt <= 0) return position;
+
+    // Put the profit-taking order on Bybit itself. It remains active even when the phone
+    // is locked or the Android process is temporarily unavailable.
+    const minNetProfit = Math.max(
+      AUTO_SELL_MIN_NET_USDT,
+      position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100),
+    );
+    const grossTarget = position.entryPrice * (1 + AUTO_SELL_PROFIT_PCT / 100);
+    const makerNetTarget = (position.costUsdt + minNetProfit)
+      / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100));
+    const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
+
+    const exit = await placeSpotLimitSellBase(
+      credentials,
+      position.symbol,
+      position.qty,
+      desiredSellPrice,
+    );
+    const protectedCost = position.costUsdt * (exit.normalizedQty / position.qty);
+    return {
+      ...position,
+      qty: exit.normalizedQty,
+      costUsdt: protectedCost,
+      exitOrderId: exit.orderId,
+      targetSellPrice: exit.normalizedPrice,
+      sellReady: false,
+    };
+  };
+
   const startAccumulationEngine = () => {
     if (accumulationRunning) return;
     accumulationStopRef.current = false;
@@ -801,8 +832,23 @@ export const TradeScreen: React.FC<Props> = ({
             fromPortfolio: true,
           }];
         }
+        // Immediately calculate a fee-aware profitable SELL target and leave a GTC LIMIT
+        // order on Bybit for every adopted wallet position. This also covers positions bought
+        // by an older app build before an upgrade.
+        const happyOwnedBeforeProtection = livePositionsRef.current.filter((position) => !position.fromPortfolio);
+        const protectedSmart: TrackedPosition[] = [];
+        for (const position of livePositionsRef.current.filter((item) => item.fromPortfolio)) {
+          if (accumulationStopRef.current) break;
+          try {
+            protectedSmart.push(await protectPortfolioPositionWithLimitSell(position));
+          } catch (e: unknown) {
+            protectedSmart.push(position);
+            setAccumulationStatus(`SMART: ${position.symbol} — nie udało się wystawić SELL, pozostaje monitoring: ${e instanceof Error ? e.message : 'błąd Bybit'}`);
+          }
+        }
+        livePositionsRef.current = [...happyOwnedBeforeProtection, ...protectedSmart];
         setLivePositions([...livePositionsRef.current]);
-        setAccumulationStatus(`SMART: automatycznie monitoruję ${portfolioSeeds.length} coinów z portfela.`);
+        setAccumulationStatus(`SMART: monitoruję ${portfolioSeeds.length} coinów; zlecenia SELL są utrzymywane po stronie Bybit.`);
 
         while (!accumulationStopRef.current) {
           try {
