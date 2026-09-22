@@ -16,6 +16,7 @@ import {
 import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { ApiCredentials, TradeAck } from '../api/types';
 import {
+  fetchSpotExecutions,
   fetchSpotMarketSnapshot,
   fetchSpotOrderExecutions,
   fetchSpotUsdtMarketCandidates,
@@ -702,61 +703,115 @@ export const TradeScreen: React.FC<Props> = ({
     }
   };
 
+  const discoverPortfolioSeeds = async (): Promise<AssetSmartAutoSeed[]> => {
+    const [wallet, history] = await Promise.all([
+      fetchWalletBalance(credentials),
+      fetchSpotExecutions(credentials, 100),
+    ]);
+    if (!wallet) return [];
+
+    const seeds: AssetSmartAutoSeed[] = [];
+    for (const asset of wallet.coin || []) {
+      const coin = asset.coin.toUpperCase();
+      if (coin === 'USDT') continue;
+      const freeQty = Number(asset.free || asset.availableToWithdraw || asset.walletBalance || 0);
+      const usdValue = Number(asset.usdValue || 0);
+      if (!Number.isFinite(freeQty) || freeQty <= 0 || !Number.isFinite(usdValue) || usdValue < 1) continue;
+
+      const symbol = `${coin}USDT`;
+      const buys = history
+        .filter((row) => row.symbol.toUpperCase() === symbol && row.side === 'Buy')
+        .sort((a, b) => Number(b.execTime) - Number(a.execTime));
+      const lastBuy = buys[0];
+      if (!lastBuy) continue;
+
+      const buyPrice = Number(lastBuy.execPrice);
+      const buyQty = Number(lastBuy.execQty);
+      const buyValue = Number(lastBuy.execValue);
+      if (![buyPrice, buyQty, buyValue].every((value) => Number.isFinite(value) && value > 0)) continue;
+
+      const baseFee = lastBuy.feeCurrency?.toUpperCase() === coin ? Number(lastBuy.execFee) || 0 : 0;
+      const quoteFee = lastBuy.feeCurrency?.toUpperCase() === 'USDT' ? Number(lastBuy.execFee) || 0 : 0;
+      const managedQty = Math.max(0, Math.min(freeQty, buyQty - baseFee));
+      if (managedQty <= 0) continue;
+
+      const fullBuyNetQty = Math.max(1e-12, buyQty - baseFee);
+      const fullBuyCost = buyValue + quoteFee + baseFee * buyPrice;
+      const proportionalCost = fullBuyCost * (managedQty / fullBuyNetQty);
+      seeds.push({ symbol, baseQty: managedQty, buyPrice, buyCostUsdt: proportionalCost });
+    }
+    return seeds;
+  };
+
   const startAccumulationEngine = () => {
     if (accumulationRunning) return;
-    const portfolioSeeds = managedHoldings.length > 0 ? managedHoldings : (initialHolding ? [initialHolding] : []);
-    if (portfolioSeeds.length === 0) {
-      setAccumulationStatus('Brak coinów wybranych do Smart.');
-      return;
-    }
-
-    for (const holding of portfolioSeeds) {
-      if (livePositionsRef.current.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
-      livePositionsRef.current = [...livePositionsRef.current, {
-        id: `portfolio-${holding.symbol}-${Date.now()}`,
-        symbol: holding.symbol,
-        qty: holding.baseQty,
-        costUsdt: holding.buyCostUsdt,
-        entryPrice: holding.buyPrice,
-        peakMovePct: 0,
-        currentMovePct: 0,
-        currentPnlUsdt: 0,
-        sellReady: false,
-        fromPortfolio: true,
-      }];
-    }
-    setLivePositions([...livePositionsRef.current]);
     accumulationStopRef.current = false;
     setAccumulationRunning(true);
-    setAccumulationStatus(`SMART uruchomiony niezależnie dla ${portfolioSeeds.length} coinów.`);
+    setAccumulationStatus('SMART: wykrywam coiny dostępne w portfelu i ich ostatnią cenę zakupu...');
 
     void (async () => {
-      while (!accumulationStopRef.current) {
-        try {
-          const happyOwned = livePositionsRef.current.filter((position) => !position.fromPortfolio);
-          const smartOwned: TrackedPosition[] = [];
-          for (const position of livePositionsRef.current.filter((item) => item.fromPortfolio)) {
-            try { smartOwned.push(await updateTrackedPosition(position)); }
-            catch { smartOwned.push(position); }
-          }
-          livePositionsRef.current = [...happyOwned, ...smartOwned];
-          setLivePositions([...livePositionsRef.current]);
+      try {
+        const discovered = await discoverPortfolioSeeds();
+        const requested = managedHoldings.length > 0 ? managedHoldings : (initialHolding ? [initialHolding] : []);
+        const bySymbol = new Map<string, AssetSmartAutoSeed>();
+        for (const holding of [...discovered, ...requested]) bySymbol.set(holding.symbol, holding);
+        const portfolioSeeds = Array.from(bySymbol.values());
 
-          for (const activeCycle of Array.from(accumulationRef.current.values())) {
-            if (accumulationStopRef.current) break;
-            await tryFinishAccumulation(activeCycle.symbol);
-          }
-          if (!accumulationStopRef.current) await tryStartAccumulation();
-          setAccumulationStatus(`SMART: monitoruję ${smartOwned.length} niezależnych pozycji • aktywne cykle ${accumulationRef.current.size}.`);
-          await sleep(900);
-        } catch (e: unknown) {
-          setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
-          await sleep(3000);
+        if (portfolioSeeds.length === 0) {
+          setAccumulationStatus('SMART: brak coinów z rozpoznaną ceną zakupu. Nie sprzedaję aktywów bez kosztu bazowego.');
+          setAccumulationRunning(false);
+          return;
         }
+
+        setManagedHoldings(portfolioSeeds);
+        for (const holding of portfolioSeeds) {
+          if (livePositionsRef.current.some((item) => item.symbol === holding.symbol && item.fromPortfolio)) continue;
+          livePositionsRef.current = [...livePositionsRef.current, {
+            id: `portfolio-${holding.symbol}-${Date.now()}`,
+            symbol: holding.symbol,
+            qty: holding.baseQty,
+            costUsdt: holding.buyCostUsdt,
+            entryPrice: holding.buyPrice,
+            peakMovePct: 0,
+            currentMovePct: 0,
+            currentPnlUsdt: 0,
+            sellReady: false,
+            fromPortfolio: true,
+          }];
+        }
+        setLivePositions([...livePositionsRef.current]);
+        setAccumulationStatus(`SMART: automatycznie monitoruję ${portfolioSeeds.length} coinów z portfela.`);
+
+        while (!accumulationStopRef.current) {
+          try {
+            const happyOwned = livePositionsRef.current.filter((position) => !position.fromPortfolio);
+            const smartOwned: TrackedPosition[] = [];
+            for (const position of livePositionsRef.current.filter((item) => item.fromPortfolio)) {
+              try { smartOwned.push(await updateTrackedPosition(position)); }
+              catch { smartOwned.push(position); }
+            }
+            livePositionsRef.current = [...happyOwned, ...smartOwned];
+            setLivePositions([...livePositionsRef.current]);
+
+            for (const activeCycle of Array.from(accumulationRef.current.values())) {
+              if (accumulationStopRef.current) break;
+              await tryFinishAccumulation(activeCycle.symbol);
+            }
+            if (!accumulationStopRef.current) await tryStartAccumulation();
+            setAccumulationStatus(`SMART: monitoruję ${smartOwned.length} coinów portfela • aktywne cykle ${accumulationRef.current.size}.`);
+            await sleep(900);
+          } catch (e: unknown) {
+            setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
+            await sleep(3000);
+          }
+        }
+      } catch (e: unknown) {
+        setAccumulationStatus(`SMART: nie udało się wczytać portfela — ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
+      } finally {
+        setAccumulationRunning(false);
+        accumulationStopRef.current = false;
+        setAccumulationStatus((current) => current.startsWith('SMART: nie udało') ? current : 'SMART zatrzymany. Happy Hour działa niezależnie.');
       }
-      setAccumulationRunning(false);
-      accumulationStopRef.current = false;
-      setAccumulationStatus('SMART zatrzymany. Happy Hour działa niezależnie.');
     })();
   };
 
@@ -790,6 +845,7 @@ export const TradeScreen: React.FC<Props> = ({
     setAccumulationCycles([]);
     setAccumulatedCoin(0);
     setSmartRunning(true);
+    if (smartMode === 'assist' && !accumulationRunning) startAccumulationEngine();
     setError('');
     setCycleCount(0);
     setScanCount(0);
