@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { ApiCredentials, TradeAck } from '../api/types';
+import { COIN_BUILDER_SYMBOLS } from '../services/coinBuilder';
 import {
   fetchSpotExecutions,
   fetchSpotMarketSnapshot,
@@ -78,6 +79,7 @@ interface AccumulationCycle {
 
 const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'SUIUSDT'];
 const CORE_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT']);
+const COIN_BUILDER_SET = new Set<string>(COIN_BUILDER_SYMBOLS);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
@@ -544,7 +546,7 @@ export const TradeScreen: React.FC<Props> = ({
   const tryStartAccumulation = async (): Promise<boolean> => {
     if (sellBusyRef.current) return false;
     const candidates = livePositionsRef.current
-      .filter((position) => position.fromPortfolio && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0 && !accumulationRef.current.has(position.symbol))
+      .filter((position) => position.fromPortfolio && COIN_BUILDER_SET.has(position.symbol) && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0 && !position.exitOrderId && !accumulationRef.current.has(position.symbol))
       .sort((a, b) => (b.currentMovePct - b.peakMovePct) - (a.currentMovePct - a.peakMovePct));
 
     for (const position of candidates) {
@@ -779,10 +781,17 @@ export const TradeScreen: React.FC<Props> = ({
       / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100));
     const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
 
+    // Coin Builder assets keep the majority as CORE/HOLD. Only the configured working
+    // slice is locked in the exchange-side GTC order, so XRP/BTC/ETH/SOL/PEPE/FLOKI/VELO
+    // can compound without accidentally liquidating the whole holding.
+    const configuredShare = Math.min(1, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
+    const requestedQty = COIN_BUILDER_SET.has(position.symbol)
+      ? position.qty * configuredShare
+      : position.qty;
     const exit = await placeSpotLimitSellBase(
       credentials,
       position.symbol,
-      position.qty,
+      requestedQty,
       desiredSellPrice,
     );
     const protectedCost = position.costUsdt * (exit.normalizedQty / position.qty);
