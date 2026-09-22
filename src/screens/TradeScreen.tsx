@@ -747,13 +747,20 @@ export const TradeScreen: React.FC<Props> = ({
 
       const baseFee = lastBuy.feeCurrency?.toUpperCase() === coin ? Number(lastBuy.execFee) || 0 : 0;
       const quoteFee = lastBuy.feeCurrency?.toUpperCase() === 'USDT' ? Number(lastBuy.execFee) || 0 : 0;
-      const managedQty = Math.max(0, Math.min(freeQty, buyQty - baseFee));
+      // Manage the CURRENT wallet quantity, not only the quantity from the last BUY.
+      // This is critical after an app upgrade/restart: positions opened by an older build
+      // (for example AVAX/ARB/DOGE) must immediately re-enter SMART monitoring.
+      const managedQty = freeQty;
       if (managedQty <= 0) continue;
 
+      // Reconstruct a conservative cost basis from execution history.
+      // Prefer the latest BUY price as the anchor, but apply it to the current free balance
+      // so a position is never silently ignored just because the latest fill was smaller.
       const fullBuyNetQty = Math.max(1e-12, buyQty - baseFee);
       const fullBuyCost = buyValue + quoteFee + baseFee * buyPrice;
-      const proportionalCost = fullBuyCost * (managedQty / fullBuyNetQty);
-      seeds.push({ symbol, baseQty: managedQty, buyPrice, buyCostUsdt: proportionalCost });
+      const unitCost = fullBuyCost / fullBuyNetQty;
+      const proportionalCost = unitCost * managedQty;
+      seeds.push({ symbol, baseQty: managedQty, buyPrice: unitCost, buyCostUsdt: proportionalCost });
     }
     return seeds;
   };
@@ -808,11 +815,14 @@ export const TradeScreen: React.FC<Props> = ({
             livePositionsRef.current = [...happyOwned, ...smartOwned];
             setLivePositions([...livePositionsRef.current]);
 
+            // First harvest profitable wallet positions, then handle any pending rebuy cycle.
+            // This prevents an old position from sitting in profit after an upgrade while SMART
+            // only watches positions created in the current process.
+            if (!accumulationStopRef.current) await tryStartAccumulation();
             for (const activeCycle of Array.from(accumulationRef.current.values())) {
               if (accumulationStopRef.current) break;
               await tryFinishAccumulation(activeCycle.symbol);
             }
-            if (!accumulationStopRef.current) await tryStartAccumulation();
             setAccumulationStatus(`SMART: monitoruję ${smartOwned.length} coinów portfela • aktywne cykle ${accumulationRef.current.size}.`);
             await sleep(900);
           } catch (e: unknown) {
