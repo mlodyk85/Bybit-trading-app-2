@@ -17,13 +17,16 @@ import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { ApiCredentials, TradeAck } from '../api/types';
 import {
   fetchSpotMarketSnapshot,
+  fetchSpotOrderExecutions,
   fetchSpotUsdtMarketCandidates,
   fetchSpotUsdtSymbols,
   fetchWalletBalance,
+  placeSpotLimitSellBase,
   placeSpotMarketOrder,
   placeSpotMarketSellBase,
   SpotMarketCandidate,
   SpotMarketSnapshot,
+  summarizeSpotExecutions,
   waitForSpotFill,
 } from '../api/bybit';
 
@@ -56,6 +59,10 @@ interface TrackedPosition {
   currentPnlUsdt: number;
   sellReady: boolean;
   fromPortfolio?: boolean;
+  exitOrderId?: string;
+  targetSellPrice?: number;
+  closed?: boolean;
+  realizedPnlUsdt?: number;
 }
 
 interface AccumulationCycle {
@@ -390,6 +397,26 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const updateTrackedPosition = async (position: TrackedPosition): Promise<TrackedPosition> => {
+    if (position.exitOrderId && !position.fromPortfolio) {
+      const rows = await fetchSpotOrderExecutions(credentials, position.exitOrderId);
+      const fill = summarizeSpotExecutions(rows);
+      if (fill && fill.baseQty + 1e-10 >= position.qty * 0.999) {
+        const baseCoin = position.symbol.replace(/USDT$/, '');
+        const sellFeeUsdt = fill.feeByCurrency.USDT || 0;
+        const sellFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
+        const netProceeds = Math.max(0, fill.quoteValue - sellFeeUsdt - sellFeeBaseUsdt);
+        const pnl = netProceeds - position.costUsdt;
+        return {
+          ...position,
+          currentMovePct: position.entryPrice > 0 ? ((fill.avgPrice - position.entryPrice) / position.entryPrice) * 100 : 0,
+          currentPnlUsdt: pnl,
+          sellReady: false,
+          closed: true,
+          realizedPnlUsdt: pnl,
+        };
+      }
+    }
+
     const snapshot = await fetchSpotMarketSnapshot(position.symbol);
     const executablePrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
     const movePct = position.entryPrice > 0 ? ((executablePrice - position.entryPrice) / position.entryPrice) * 100 : 0;
@@ -398,7 +425,7 @@ export const TradeScreen: React.FC<Props> = ({
     const conservativeExitCost = grossExitValue * (EXIT_COST_BUFFER_PCT / 100);
     const currentPnlUsdt = grossExitValue - conservativeExitCost - position.costUsdt;
     const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
-    const sellReady = movePct >= AUTO_SELL_PROFIT_PCT && currentPnlUsdt >= minNetProfit;
+    const sellReady = !position.exitOrderId && movePct >= AUTO_SELL_PROFIT_PCT && currentPnlUsdt >= minNetProfit;
     return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady };
   };
 
@@ -432,9 +459,34 @@ export const TradeScreen: React.FC<Props> = ({
         currentPnlUsdt: 0,
         sellReady: false,
       };
-      livePositionsRef.current = [...livePositionsRef.current, position];
+
+      let trackedPosition = position;
+      let exitStatus = 'awaryjny monitoring ceny';
+      try {
+        const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+        const grossTarget = position.entryPrice * (1 + AUTO_SELL_PROFIT_PCT / 100);
+        const makerNetTarget = position.qty > 0
+          ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
+          : grossTarget;
+        const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
+        const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice);
+        const protectedCost = position.qty > 0 ? position.costUsdt * (exit.normalizedQty / position.qty) : position.costUsdt;
+        trackedPosition = {
+          ...position,
+          qty: exit.normalizedQty,
+          costUsdt: protectedCost,
+          exitOrderId: exit.orderId,
+          targetSellPrice: exit.normalizedPrice,
+          sellReady: false,
+        };
+        exitStatus = `GTC SELL @ ${priceText(exit.normalizedPrice)} pozostawiony na Bybit`;
+      } catch (exitError: unknown) {
+        exitStatus = `nie udało się wystawić LIMIT SELL (${exitError instanceof Error ? exitError.message : 'błąd'}); bot monitoruje i użyje bezpiecznego wyjścia`;
+      }
+
+      livePositionsRef.current = [...livePositionsRef.current, trackedPosition];
       setLivePositions([...livePositionsRef.current]);
-      setSmartStatus(`HAPPY HOUR BUY ${position.symbol}: ${trade.toFixed(2)} USDT. Wyjście tylko po dodatnim NET po rzeczywistym fee.`);
+      setSmartStatus(`HAPPY HOUR BUY ${trackedPosition.symbol}: ${trade.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd BUY.';
@@ -822,13 +874,30 @@ export const TradeScreen: React.FC<Props> = ({
             const smartOwned = livePositionsRef.current.filter((position) => position.fromPortfolio);
             const refreshed: TrackedPosition[] = [];
             for (const position of livePositionsRef.current.filter((item) => !item.fromPortfolio)) {
-              try { refreshed.push(await updateTrackedPosition(position)); }
-              catch { refreshed.push(position); }
+              try {
+                const updated = await updateTrackedPosition(position);
+                if (updated.closed) {
+                  const pnl = updated.realizedPnlUsdt || 0;
+                  sessionProfitRef.current += pnl;
+                  setSessionProfit(sessionProfitRef.current);
+                  if (pnl > 0) {
+                    cycleCountRef.current += 1;
+                    setCycleCount(cycleCountRef.current);
+                    setSmartStatus(`GTC SELL FILLED ${updated.symbol} • NETTO +${pnl.toFixed(4)} USDT • bot szuka następnego ruchu.`);
+                  } else {
+                    setSmartStatus(`GTC SELL FILLED ${updated.symbol} • wynik ${pnl.toFixed(4)} USDT.`);
+                  }
+                } else {
+                  refreshed.push(updated);
+                }
+              } catch {
+                refreshed.push(position);
+              }
             }
             livePositionsRef.current = [...smartOwned, ...refreshed];
             setLivePositions([...livePositionsRef.current]);
 
-            const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
+            const sellCandidate = refreshed.find((position) => !position.fromPortfolio && !position.exitOrderId && position.sellReady && position.currentPnlUsdt > 0);
             if (sellCandidate) {
               await executeAssistSell(sellCandidate);
               await sleep(500);
