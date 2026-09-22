@@ -18,6 +18,7 @@ import { ApiCredentials, TradeAck } from '../api/types';
 import {
   fetchSpotExecutions,
   fetchSpotMarketSnapshot,
+  fetchSpotMinOrderAmt,
   fetchSpotOrderExecutions,
   fetchSpotUsdtMarketCandidates,
   fetchSpotUsdtSymbols,
@@ -98,6 +99,7 @@ const EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const SMART_MIN_TRADE_USDT = 10;
 const ACCUMULATION_DEFAULT_SHARE = 0.10;
 const ACCUMULATION_MIN_PROFIT_PCT = 0.45;
+const ACCUMULATION_FORCE_HARVEST_PCT = 1.00;
 const ACCUMULATION_PEAK_PULLBACK_PCT = 0.08;
 const ACCUMULATION_REBUY_DROP_PCT = 0.45;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.03;
@@ -547,17 +549,30 @@ export const TradeScreen: React.FC<Props> = ({
 
     for (const position of candidates) {
       const pullbackPct = position.peakMovePct - position.currentMovePct;
-      if (position.currentMovePct < ACCUMULATION_MIN_PROFIT_PCT || pullbackPct < ACCUMULATION_PEAK_PULLBACK_PCT) continue;
+      const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+      const trailingHarvest = position.currentMovePct >= ACCUMULATION_MIN_PROFIT_PCT
+        && pullbackPct >= ACCUMULATION_PEAK_PULLBACK_PCT
+        && position.currentPnlUsdt >= minNetProfit;
+      const forceHarvest = position.currentMovePct >= ACCUMULATION_FORCE_HARVEST_PCT
+        && position.currentPnlUsdt >= minNetProfit;
+      if (!trailingHarvest && !forceHarvest) continue;
 
       const snapshot = await fetchSpotMarketSnapshot(position.symbol);
       const sellPrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
       if (sellPrice <= 0) continue;
 
       const configuredShare = Math.min(1, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
-      const maxByShare = position.qty * configuredShare;
-      const qty = maxByShare;
+      const totalQuote = position.qty * sellPrice;
+      const exchangeMinQuote = await fetchSpotMinOrderAmt(position.symbol);
+      if (exchangeMinQuote > 0 && totalQuote + 1e-8 < exchangeMinQuote) continue;
+
+      // Do not let a small configured share block a profitable portfolio coin.
+      // Increase only the working slice enough to satisfy the real Bybit minimum,
+      // while never selling more than the tracked balance.
+      const minExecutableQty = exchangeMinQuote > 0 ? (exchangeMinQuote * 1.01) / sellPrice : 0;
+      const qty = Math.min(position.qty, Math.max(position.qty * configuredShare, minExecutableQty));
       const estimatedQuote = qty * sellPrice;
-      if (qty <= 0 || estimatedQuote < SMART_MIN_TRADE_USDT) continue;
+      if (qty <= 0 || estimatedQuote <= 0) continue;
 
       sellBusyRef.current = true;
       setBusy(true);
