@@ -114,6 +114,27 @@ export interface ExecutionListResult {
   nextPageCursor?: string;
 }
 
+export interface SpotOpenOrder {
+  symbol: string;
+  orderId: string;
+  orderLinkId?: string;
+  side: 'Buy' | 'Sell' | string;
+  orderType: string;
+  price: string;
+  qty: string;
+  cumExecQty?: string;
+  cumExecValue?: string;
+  orderStatus: string;
+  createdTime?: string;
+  updatedTime?: string;
+}
+
+export interface SpotOpenOrderListResult {
+  category: string;
+  list: SpotOpenOrder[];
+  nextPageCursor?: string;
+}
+
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 export interface ApiError {
