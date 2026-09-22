@@ -8,6 +8,8 @@ import {
   Position,
   PositionListResult,
   SpotExecution,
+  SpotOpenOrder,
+  SpotOpenOrderListResult,
   TradeAck,
   WalletAccountResult,
   WalletBalanceResult,
@@ -29,6 +31,11 @@ interface SpotInstrument {
     minOrderQty?: string;
     minOrderAmt?: string;
     maxOrderQty?: string;
+  };
+  priceFilter?: {
+    tickSize?: string;
+    minPrice?: string;
+    maxPrice?: string;
   };
 }
 
@@ -389,6 +396,73 @@ export async function placeSpotMarketSellBase(
   return await bybitPost<CreateSpotOrderResult>('/v5/order/create', {
     category: 'spot', symbol, side: 'Sell', orderType: 'Market', qty: baseQty.toFixed(precision), marketUnit: 'baseCoin', isLeverage: 0, orderFilter: 'Order', orderLinkId,
   }, credentials);
+}
+
+function roundUpToStep(value: number, stepText?: string): { value: number; precision: number } {
+  const text = stepText || '0.00000001';
+  const step = Number(text);
+  const precision = Math.min(12, decimalPlaces(text));
+  if (!Number.isFinite(value) || value <= 0) return { value: 0, precision };
+  if (!Number.isFinite(step) || step <= 0) return { value, precision };
+  const factor = 10 ** precision;
+  const stepped = Math.ceil((value - Number.EPSILON) / step) * step;
+  return { value: Math.ceil((stepped - Number.EPSILON) * factor) / factor, precision };
+}
+
+export async function placeSpotLimitSellBase(
+  credentials: ApiCredentials,
+  symbolInput: string,
+  baseQtyInput: number,
+  limitPriceInput: number
+): Promise<CreateSpotOrderResult & { normalizedPrice: number; normalizedQty: number }> {
+  const symbol = symbolInput.trim().toUpperCase();
+  if (!Number.isFinite(baseQtyInput) || baseQtyInput <= 0) throw new BybitError('Nieprawidłowa ilość aktywa do sprzedaży.', 'INVALID_QTY');
+  if (!Number.isFinite(limitPriceInput) || limitPriceInput <= 0) throw new BybitError('Nieprawidłowa cena LIMIT SELL.', 'INVALID_PRICE');
+
+  const instrument = await fetchSpotInstrument(symbol);
+  const stepText = instrument.lotSizeFilter?.qtyStep || instrument.lotSizeFilter?.basePrecision || '0.00000001';
+  const qtyStep = Number(stepText);
+  const qtyPrecision = Math.min(12, decimalPlaces(stepText));
+  const qtyFactor = 10 ** qtyPrecision;
+  const steppedQty = qtyStep > 0 ? Math.floor((baseQtyInput + Number.EPSILON) / qtyStep) * qtyStep : baseQtyInput;
+  const baseQty = Math.floor((steppedQty + Number.EPSILON) * qtyFactor) / qtyFactor;
+  const minQty = Number(instrument.lotSizeFilter?.minOrderQty || '0');
+  if (baseQty <= 0 || (minQty > 0 && baseQty < minQty)) {
+    throw new BybitError('Ilość LIMIT SELL po zaokrągleniu jest mniejsza niż minimum Bybit.', 'MIN_QTY');
+  }
+
+  const rounded = roundUpToStep(limitPriceInput, instrument.priceFilter?.tickSize);
+  const limitPrice = rounded.value;
+  if (limitPrice <= 0) throw new BybitError('Cena LIMIT SELL po zaokrągleniu jest nieprawidłowa.', 'INVALID_PRICE');
+
+  const minOrderAmt = Number(instrument.lotSizeFilter?.minOrderAmt || '0');
+  if (minOrderAmt > 0 && baseQty * limitPrice + 1e-8 < minOrderAmt) {
+    throw new BybitError(`Wartość LIMIT SELL ${(baseQty * limitPrice).toFixed(2)} USDT jest poniżej minimum Bybit ${minOrderAmt.toFixed(2)} USDT.`, 'MIN_ORDER_AMT');
+  }
+
+  const orderLinkId = `profit-s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
+  const result = await bybitPost<CreateSpotOrderResult>('/v5/order/create', {
+    category: 'spot',
+    symbol,
+    side: 'Sell',
+    orderType: 'Limit',
+    qty: baseQty.toFixed(qtyPrecision),
+    price: limitPrice.toFixed(rounded.precision),
+    timeInForce: 'GTC',
+    isLeverage: 0,
+    orderFilter: 'Order',
+    orderLinkId,
+  }, credentials);
+  return { ...result, normalizedPrice: limitPrice, normalizedQty: baseQty };
+}
+
+export async function fetchSpotOpenOrders(credentials: ApiCredentials, limit = 50): Promise<SpotOpenOrder[]> {
+  const result = await bybitGet<SpotOpenOrderListResult>(
+    '/v5/order/realtime',
+    { category: 'spot', openOnly: 0, limit: Math.max(1, Math.min(50, limit)) },
+    credentials
+  );
+  return (result?.list || []).filter((order) => !['Filled', 'Cancelled', 'Rejected', 'Deactivated'].includes(order.orderStatus));
 }
 
 export async function fetchSpotExecutions(credentials: ApiCredentials, limit = 50): Promise<SpotExecution[]> {
