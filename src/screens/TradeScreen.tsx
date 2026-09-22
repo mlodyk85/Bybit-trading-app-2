@@ -353,16 +353,18 @@ export const TradeScreen: React.FC<Props> = ({
       if (!bestObserved || windowMomentumPct < bestObserved.momentum) bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
 
       const isCore = CORE_SYMBOLS.has(now.symbol);
-      // Two valid entry shapes:
-      // 1) dip + confirmed rebound, 2) liquid momentum continuation.
-      // This avoids a scanner that can run all night waiting for one exact -0.30% pattern.
+      // Never chase a market that is already weak on the wider 24h structure.
+      // Momentum entries require a positive 24h trend; dip entries require a real rebound,
+      // not merely a falling price that happens to print one green tick.
       if (now.spreadPct > MAX_SPREAD_PCT) continue;
       const dipReversal = windowMomentumPct <= BUY_DIP_MIN_PCT
         && windowMomentumPct >= BUY_DIP_MAX_PCT
-        && shortMomentumPct >= BUY_REVERSAL_PCT;
+        && shortMomentumPct >= BUY_REVERSAL_PCT
+        && now.change24hPct >= -1.0;
       const momentumContinuation = windowMomentumPct >= 0.08
-        && windowMomentumPct <= 0.85
+        && windowMomentumPct <= 0.65
         && shortMomentumPct >= 0.035
+        && now.change24hPct >= 0.75
         && isCore;
       if (!dipReversal && !momentumContinuation) continue;
 
@@ -378,7 +380,7 @@ export const TradeScreen: React.FC<Props> = ({
     setActiveScore(best);
     if (best) {
       const quality = CORE_SYMBOLS.has(best.market.symbol) ? 'CORE' : 'ALT';
-      setScanInfo(`DOŁEK ${best.market.symbol} • ${quality} • spadek ${best.windowMomentumPct.toFixed(4)}% • odbicie +${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
+      setScanInfo(`WEJŚCIE ${best.market.symbol} • ${quality} • 24h ${best.market.change24hPct >= 0 ? '+' : ''}${best.market.change24hPct.toFixed(2)}% • ruch ${best.windowMomentumPct.toFixed(4)}% • krótki +${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
     } else if (bestObserved) {
       setScanInfo(`BRAK WEJŚCIA • ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • czekam na odbicie po spadku albo potwierdzony momentum`);
     } else {
