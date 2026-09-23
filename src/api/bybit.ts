@@ -462,6 +462,21 @@ export async function placeSpotLimitSellBase(
   return { ...result, normalizedPrice: limitPrice, normalizedQty: baseQty };
 }
 
+export async function cancelSpotOrder(
+  credentials: ApiCredentials,
+  symbolInput: string,
+  orderId: string
+): Promise<void> {
+  const symbol = symbolInput.trim().toUpperCase();
+  if (!symbol || !orderId) throw new BybitError('Brak symbolu lub orderId do anulowania zlecenia.', 'INVALID_ORDER');
+  await bybitPost<Record<string, never>>('/v5/order/cancel', {
+    category: 'spot',
+    symbol,
+    orderId,
+    orderFilter: 'Order',
+  }, credentials);
+}
+
 export async function fetchSpotOpenOrders(credentials: ApiCredentials, limit = 50): Promise<SpotOpenOrder[]> {
   const result = await bybitGet<SpotOpenOrderListResult>(
     '/v5/order/realtime',
