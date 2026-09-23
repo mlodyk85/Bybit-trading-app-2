@@ -631,7 +631,12 @@ export const TradeScreen: React.FC<Props> = ({
       // Increase only the working slice enough to satisfy the real Bybit minimum,
       // while never selling more than the tracked balance.
       const minExecutableQty = exchangeMinQuote > 0 ? (exchangeMinQuote * 1.01) / sellPrice : 0;
-      const qty = Math.min(position.qty, Math.max(position.qty * configuredShare, minExecutableQty));
+      const hardMaxWorkingQty = position.qty * 0.10;
+      if (minExecutableQty > hardMaxWorkingQty + 1e-12) {
+        setSmartStatus(`SMART COIN BUILDER: ${position.symbol} pomijam SELL — minimum Bybit wymagałoby ruszenia >10% pozycji.`);
+        continue;
+      }
+      const qty = Math.min(hardMaxWorkingQty, Math.max(position.qty * configuredShare, minExecutableQty));
       const estimatedQuote = qty * sellPrice;
       if (qty <= 0 || estimatedQuote <= 0) continue;
 
@@ -826,44 +831,6 @@ export const TradeScreen: React.FC<Props> = ({
     return seeds;
   };
 
-  const protectPortfolioPositionWithLimitSell = async (position: TrackedPosition): Promise<TrackedPosition> => {
-    if (isSellLocked(position.symbol)) return { ...position, exitOrderId: undefined, targetSellPrice: undefined, sellReady: false };
-    if (position.exitOrderId || position.qty <= 0 || position.costUsdt <= 0) return position;
-
-    // Put the profit-taking order on Bybit itself. It remains active even when the phone
-    // is locked or the Android process is temporarily unavailable.
-    const minNetProfit = Math.max(
-      AUTO_SELL_MIN_NET_USDT,
-      position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100),
-    );
-    const grossTarget = position.entryPrice * (1 + AUTO_SELL_PROFIT_PCT / 100);
-    const makerNetTarget = (position.costUsdt + minNetProfit)
-      / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100));
-    const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
-
-    // Coin Builder assets keep the majority as CORE/HOLD. Only the configured working
-    // slice is locked in the exchange-side GTC order, so XRP/BTC/ETH/SOL/PEPE/FLOKI/VELO
-    // can compound without accidentally liquidating the whole holding.
-    const configuredShare = Math.min(0.10, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
-    const requestedQty = COIN_BUILDER_SET.has(position.symbol)
-      ? position.qty * configuredShare
-      : position.qty;
-    const exit = await placeSpotLimitSellBase(
-      credentials,
-      position.symbol,
-      requestedQty,
-      desiredSellPrice,
-    );
-    const protectedCost = position.costUsdt * (exit.normalizedQty / position.qty);
-    return {
-      ...position,
-      qty: exit.normalizedQty,
-      costUsdt: protectedCost,
-      exitOrderId: exit.orderId,
-      targetSellPrice: exit.normalizedPrice,
-      sellReady: false,
-    };
-  };
 
   const startAccumulationEngine = () => {
     if (accumulationRunning) return;
