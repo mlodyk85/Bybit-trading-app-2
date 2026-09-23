@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { ApiCredentials, TradeAck } from '../api/types';
-import { COIN_BUILDER_SYMBOLS } from '../services/coinBuilder';
+import { COIN_BUILDER_SYMBOLS, isCoreAccumulationSymbol } from '../services/coinBuilder';
 import { loadSellLockedSymbols } from '../services/tradingPreferences';
 import {
   cancelSpotOrder,
@@ -82,7 +82,6 @@ interface AccumulationCycle {
 
 const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'SUIUSDT'];
 const CORE_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT']);
-const COIN_BUILDER_SET = new Set<string>(COIN_BUILDER_SYMBOLS);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
@@ -728,9 +727,13 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const tryStartAccumulation = async (): Promise<boolean> => {
+    // Strategic CORE is accumulation-only in build 160. Existing holdings are never
+    // sold to manufacture USDT; realized USDT profit is used for confirmed dip buys.
+    return false;
+    /*
     if (sellBusyRef.current) return false;
     const candidates = livePositionsRef.current
-      .filter((position) => position.fromPortfolio && false)
+      .filter((position) => position.fromPortfolio && !isCoreAccumulationSymbol(position.symbol))
       .sort((a, b) => (b.currentMovePct - b.peakMovePct) - (a.currentMovePct - a.peakMovePct));
 
     for (const position of candidates) {
@@ -814,6 +817,7 @@ export const TradeScreen: React.FC<Props> = ({
       }
     }
     return false;
+    */
   };
 
   const tryFinishAccumulation = async (symbol?: string): Promise<boolean> => {
@@ -997,7 +1001,8 @@ export const TradeScreen: React.FC<Props> = ({
         // Portfolio SMART is quantity-first: never place an immediate SELL just because the
         // current price is above the historical entry. Old app-generated profit-s-* orders
         // are removed so a legacy build cannot keep draining a long-term holding.
-        const legacyCancelled = await cancelLegacyPortfolioProfitSells(portfolioSeeds.map((item) => item.symbol));
+        const strategicSymbols = portfolioSeeds.map((item) => item.symbol).filter(isCoreAccumulationSymbol);
+        const legacyCancelled = await cancelLegacyPortfolioProfitSells(strategicSymbols);
         livePositionsRef.current = livePositionsRef.current.map((position) => position.fromPortfolio
           ? { ...position, exitOrderId: undefined, targetSellPrice: undefined, sellReady: false }
           : position);
