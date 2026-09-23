@@ -86,12 +86,12 @@ const STRATEGIC_CORE_SYMBOLS = new Set<string>(COIN_BUILDER_SYMBOLS);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
-const SCAN_SAMPLES = 7;
-const SCAN_INTERVAL_MS = 1400;
+const SCAN_SAMPLES = 9;
+const SCAN_INTERVAL_MS = 1250;
 const BUY_DIP_MIN_PCT = -0.12;
 const BUY_DIP_MAX_PCT = -2.50;
 const BUY_REVERSAL_PCT = 0.025;
-const MAX_SPREAD_PCT = 0.16;
+const MAX_SPREAD_PCT = 0.32;
 // Safety-first thresholds. The bot never intentionally triggers a SELL at break-even.
 const AUTO_SELL_PROFIT_PCT = 0.35;
 const AUTO_SELL_MIN_NET_USDT = 0.01;
@@ -101,7 +101,7 @@ const SPOT_TAKER_FEE_PCT = 0.075;
 const MARKET_ROUND_TRIP_FEE_PCT = SPOT_TAKER_FEE_PCT * 2;
 const SLIPPAGE_SAFETY_PCT = 0.04;
 const EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
-const SMART_MIN_TRADE_USDT = 10;
+const SMART_MIN_TRADE_USDT = 5;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.15;
 const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const CORE_PROFIT_ALLOCATION_PCT = 0.50;
@@ -136,7 +136,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [targetProfit, setTargetProfit] = useState('0');
   const [maxLoss, setMaxLoss] = useState('2');
   const [maxCycles, setMaxCycles] = useState('1000');
-  const [maxSlots, setMaxSlots] = useState('3');
+  const [maxSlots, setMaxSlots] = useState('6');
   const [shadowCapital, setShadowCapital] = useState('25');
   const [shadowUsdt, setShadowUsdt] = useState(25);
   const [availableUsdt, setAvailableUsdt] = useState(0);
@@ -399,7 +399,7 @@ export const TradeScreen: React.FC<Props> = ({
 
     for (let sample = 0; sample < SCAN_SAMPLES; sample += 1) {
       if (stopRef.current) return null;
-      latest = await fetchSpotUsdtMarketCandidates(40);
+      latest = await fetchSpotUsdtMarketCandidates(240);
       for (const item of latest) {
         const history = tracks.get(item.symbol) || [];
         history.push(item);
@@ -436,17 +436,30 @@ export const TradeScreen: React.FC<Props> = ({
         && windowMomentumPct >= BUY_DIP_MAX_PCT
         && shortMomentumPct >= BUY_REVERSAL_PCT
         && now.change24hPct >= -1.0;
-      const momentumContinuation = windowMomentumPct >= 0.08
-        && windowMomentumPct <= 0.65
-        && shortMomentumPct >= 0.035
-        && now.change24hPct >= 0.75
-        && isCore;
-      if (!dipReversal && !momentumContinuation) continue;
+      // Happy Hour must also catch fast ALT/MEME continuation, not only dip reversals.
+      // Require real liquidity and acceleration so the bot does not blindly chase a single green tick.
+      const momentumContinuation = windowMomentumPct >= 0.055
+        && windowMomentumPct <= 1.25
+        && shortMomentumPct >= 0.025
+        && now.change24hPct >= 0.20
+        && now.turnover24h >= 750000;
+      const fastMomentum = windowMomentumPct >= 0.12
+        && windowMomentumPct <= 1.80
+        && shortMomentumPct >= 0.055
+        && now.turnover24h >= 1500000
+        && now.spreadPct <= 0.22;
+      if (!dipReversal && !momentumContinuation && !fastMomentum) continue;
+
+      // Spread tolerance scales with liquidity: liquid memes can be traded with a slightly wider
+      // spread, while thin markets remain excluded.
+      const dynamicMaxSpread = now.turnover24h >= 10000000 ? MAX_SPREAD_PCT : now.turnover24h >= 2000000 ? 0.24 : 0.18;
+      if (now.spreadPct > dynamicMaxSpread) continue;
 
       const liquidityScore = Math.max(0, Math.log10(Math.max(now.turnover24h, 1)) - 5);
-      const coreQualityBonus = isCore ? 18 : 0;
+      const coreQualityBonus = isCore ? 6 : 0;
       const dipDepth = Math.abs(Math.min(0, windowMomentumPct));
-      const score = dipDepth * 180 + shortMomentumPct * 520 + liquidityScore * 2.2 + coreQualityBonus - now.spreadPct * 70;
+      const accelerationBonus = Math.max(0, shortMomentumPct) * 650;
+      const score = dipDepth * 150 + shortMomentumPct * 420 + accelerationBonus + liquidityScore * 3.0 + coreQualityBonus - now.spreadPct * 85;
       ranked.push({ market: now, windowMomentumPct, shortMomentumPct, score });
     }
 
@@ -538,7 +551,13 @@ export const TradeScreen: React.FC<Props> = ({
       let exitStatus = 'awaryjny monitoring ceny';
       try {
         const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
-        const grossTarget = position.entryPrice * (1 + AUTO_SELL_PROFIT_PCT / 100);
+        // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
+        // The floor still covers fees/slippage; the cap prevents an unrealistic distant exit.
+        const dynamicProfitPct = Math.max(
+          AUTO_SELL_PROFIT_PCT,
+          Math.min(0.85, 0.28 + Math.abs(candidate.windowMomentumPct) * 0.30 + Math.max(0, candidate.shortMomentumPct) * 0.75),
+        );
+        const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
         const makerNetTarget = position.qty > 0
           ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
           : grossTarget;
@@ -617,7 +636,7 @@ export const TradeScreen: React.FC<Props> = ({
     if (smartMode !== 'assist' || smartRunningRef.current || sellBusyRef.current) return;
 
     const trade = Math.min(maxOrderUsdt, Math.max(SMART_MIN_TRADE_USDT, toNumber(amount) || SMART_MIN_TRADE_USDT));
-    const slots = Math.max(1, Math.min(3, Math.floor(toNumber(maxSlots)) || 1));
+    const slots = Math.max(1, Math.min(8, Math.floor(toNumber(maxSlots)) || 1));
     const owned = livePositionsRef.current.filter((item) => !item.fromPortfolio);
     const refreshed: TrackedPosition[] = [];
 
@@ -652,18 +671,23 @@ export const TradeScreen: React.FC<Props> = ({
       return;
     }
 
-    if (await tryBuyStrategicDip()) return;
-
     const free = await refreshAvailableUsdt();
-    if (free + 1e-8 < trade || refreshed.length >= slots) return;
+    if (free + 1e-8 >= trade && refreshed.length < slots) {
+      const candidate = await scanBestCandidate();
+      if (candidate) {
+        // A core holding must not block USDT growth. Happy Hour positions are tracked
+        // independently from portfolio CORE positions, even for the same symbol.
+        const alreadyHappyOwned = refreshed.some((item) => item.symbol === candidate.market.symbol);
+        if (!alreadyHappyOwned) {
+          await buyCandidate(candidate, trade, slots);
+          return;
+        }
+      }
+    }
 
-    const candidate = await scanBestCandidate();
-    if (!candidate) return;
-
-    // A core holding must not block USDT growth. Happy Hour positions are tracked
-    // independently from portfolio CORE positions, even for the same symbol.
-    const alreadyHappyOwned = refreshed.some((item) => item.symbol === candidate.market.symbol);
-    if (!alreadyHappyOwned) await buyCandidate(candidate, trade, slots);
+    // Strategic accumulation is deliberately lower priority than free-USDT growth.
+    // It can use only the realized-profit fund and must preserve the configured USDT reserve.
+    await tryBuyStrategicDip();
   };
 
   const creditCoreFund = (realizedPnlUsdt: number) => {
