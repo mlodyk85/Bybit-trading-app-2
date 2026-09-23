@@ -92,3 +92,5 @@ jobs:
           else
             gh release create "$TAG" bybit-trading-app-release.apk --title "Bybit Trading App $TAG" --notes "Automatyczny build Android."
           fi
+
+# build-161 retrigger after Actions write permission enabled
