@@ -24,7 +24,7 @@ export interface CoinBuilderState {
   targetBuyPrice?: number;
 }
 
-export const DEFAULT_COIN_BUILDER_SHARE_PCT = 10;
+export const DEFAULT_COIN_BUILDER_SHARE_PCT = 5;
 export const COIN_BUILDER_MIN_NET_GAIN_PCT = 0.03;
 export const COIN_BUILDER_REBUY_DROP_PCT = 0.45;
 
