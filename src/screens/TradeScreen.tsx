@@ -102,12 +102,11 @@ const MARKET_ROUND_TRIP_FEE_PCT = SPOT_TAKER_FEE_PCT * 2;
 const SLIPPAGE_SAFETY_PCT = 0.04;
 const EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const SMART_MIN_TRADE_USDT = 10;
-const ACCUMULATION_DEFAULT_SHARE = 0.10;
-const ACCUMULATION_MIN_PROFIT_PCT = 0.45;
-const ACCUMULATION_FORCE_HARVEST_PCT = 1.00;
-const ACCUMULATION_PEAK_PULLBACK_PCT = 0.08;
-const ACCUMULATION_REBUY_DROP_PCT = 0.45;
-const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.03;
+const ACCUMULATION_DEFAULT_SHARE = 0.05;
+const ACCUMULATION_MIN_PROFIT_PCT = 2.00;
+const ACCUMULATION_PEAK_PULLBACK_PCT = 0.50;
+const ACCUMULATION_REBUY_DROP_PCT = 0.60;
+const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.15;
 const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 
 export const TradeScreen: React.FC<Props> = ({
@@ -151,7 +150,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [livePositions, setLivePositions] = useState<TrackedPosition[]>([]);
   const [accumulationCycles, setAccumulationCycles] = useState<AccumulationCycle[]>([]);
   const [accumulatedCoin, setAccumulatedCoin] = useState(0);
-  const [accumulationShare, setAccumulationShare] = useState('10');
+  const [accumulationShare, setAccumulationShare] = useState('5');
   const [managedHoldings, setManagedHoldings] = useState<AssetSmartAutoSeed[]>(initialHoldings);
   const [sellLockedSymbols, setSellLockedSymbols] = useState<string[]>([]);
 
@@ -270,6 +269,28 @@ export const TradeScreen: React.FC<Props> = ({
         ? { ...position, exitOrderId: undefined, targetSellPrice: undefined, sellReady: false }
         : position);
       setLivePositions([...livePositionsRef.current]);
+    }
+    return cancelled;
+  };
+
+
+  const cancelLegacyPortfolioProfitSells = async (symbols: string[]): Promise<number> => {
+    if (symbols.length === 0) return 0;
+    const managed = new Set(symbols.map((item) => item.toUpperCase()));
+    const openOrders = await fetchSpotOpenOrders(credentials, 50);
+    const targets = openOrders.filter((order) =>
+      order.side === 'Sell'
+      && managed.has(order.symbol.toUpperCase())
+      && Boolean(order.orderLinkId?.startsWith('profit-s-'))
+    );
+    let cancelled = 0;
+    for (const order of targets) {
+      try {
+        await cancelSpotOrder(credentials, order.symbol, order.orderId);
+        cancelled += 1;
+      } catch {
+        // Zlecenie mogło zostać wykonane lub anulowane w międzyczasie.
+      }
     }
     return cancelled;
   };
@@ -595,15 +616,13 @@ export const TradeScreen: React.FC<Props> = ({
       const trailingHarvest = position.currentMovePct >= ACCUMULATION_MIN_PROFIT_PCT
         && pullbackPct >= ACCUMULATION_PEAK_PULLBACK_PCT
         && position.currentPnlUsdt >= minNetProfit;
-      const forceHarvest = position.currentMovePct >= ACCUMULATION_FORCE_HARVEST_PCT
-        && position.currentPnlUsdt >= minNetProfit;
-      if (!trailingHarvest && !forceHarvest) continue;
+      if (!trailingHarvest) continue;
 
       const snapshot = await fetchSpotMarketSnapshot(position.symbol);
       const sellPrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
       if (sellPrice <= 0) continue;
 
-      const configuredShare = Math.min(1, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
+      const configuredShare = Math.min(0.10, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
       const totalQuote = position.qty * sellPrice;
       const exchangeMinQuote = await fetchSpotMinOrderAmt(position.symbol);
       if (exchangeMinQuote > 0 && totalQuote + 1e-8 < exchangeMinQuote) continue;
@@ -825,7 +844,7 @@ export const TradeScreen: React.FC<Props> = ({
     // Coin Builder assets keep the majority as CORE/HOLD. Only the configured working
     // slice is locked in the exchange-side GTC order, so XRP/BTC/ETH/SOL/PEPE/FLOKI/VELO
     // can compound without accidentally liquidating the whole holding.
-    const configuredShare = Math.min(1, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
+    const configuredShare = Math.min(0.10, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
     const requestedQty = COIN_BUILDER_SET.has(position.symbol)
       ? position.qty * configuredShare
       : position.qty;
@@ -885,23 +904,17 @@ export const TradeScreen: React.FC<Props> = ({
             fromPortfolio: true,
           }];
         }
-        // Immediately calculate a fee-aware profitable SELL target and leave a GTC LIMIT
-        // order on Bybit for every adopted wallet position. This also covers positions bought
-        // by an older app build before an upgrade.
-        const happyOwnedBeforeProtection = livePositionsRef.current.filter((position) => !position.fromPortfolio);
-        const protectedSmart: TrackedPosition[] = [];
-        for (const position of livePositionsRef.current.filter((item) => item.fromPortfolio)) {
-          if (accumulationStopRef.current) break;
-          try {
-            protectedSmart.push(await protectPortfolioPositionWithLimitSell(position));
-          } catch (e: unknown) {
-            protectedSmart.push(position);
-            setAccumulationStatus(`SMART: ${position.symbol} — nie udało się wystawić SELL, pozostaje monitoring: ${e instanceof Error ? e.message : 'błąd Bybit'}`);
-          }
-        }
-        livePositionsRef.current = [...happyOwnedBeforeProtection, ...protectedSmart];
+        // Portfolio SMART is quantity-first: never place an immediate SELL just because the
+        // current price is above the historical entry. Old app-generated profit-s-* orders
+        // are removed so a legacy build cannot keep draining a long-term holding.
+        const legacyCancelled = await cancelLegacyPortfolioProfitSells(portfolioSeeds.map((item) => item.symbol));
+        livePositionsRef.current = livePositionsRef.current.map((position) => position.fromPortfolio
+          ? { ...position, exitOrderId: undefined, targetSellPrice: undefined, sellReady: false }
+          : position);
         setLivePositions([...livePositionsRef.current]);
-        setAccumulationStatus(`SMART: monitoruję ${portfolioSeeds.length} coinów; zlecenia SELL są utrzymywane po stronie Bybit.`);
+        setAccumulationStatus(
+          `SMART COIN BUILDER: monitoruję ${portfolioSeeds.length} coinów. CORE pozostaje w coinie; pracuje maks. 10% pozycji.${legacyCancelled > 0 ? ` Anulowano ${legacyCancelled} stare SELL.` : ''}`
+        );
 
         while (!accumulationStopRef.current) {
           try {
@@ -928,7 +941,7 @@ export const TradeScreen: React.FC<Props> = ({
               if (accumulationStopRef.current) break;
               await tryFinishAccumulation(activeCycle.symbol);
             }
-            setAccumulationStatus(`SMART: monitoruję ${smartOwned.length} coinów portfela • aktywne cykle ${accumulationRef.current.size}.`);
+            setAccumulationStatus(`SMART COIN BUILDER: ${smartOwned.length} coinów • CORE/HOLD ≥90% • aktywne BUY BACK ${accumulationRef.current.size}. Bez potwierdzonej górki nie sprzedaję.`);
             await sleep(900);
           } catch (e: unknown) {
             setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
@@ -1216,15 +1229,15 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smartSub}>Oddzielny silnik • własne pozycje • nie uruchamia i nie zatrzymuje Happy Hour</Text>
             </View>
           </View>
-          <Text style={styles.smartNotice}>SMART działa niezależnie od Happy Hour i ręcznie wybranej pary. Każdy zarządzany coin ma własny cykl. Coin z blokadą SELL jest tylko monitorowany — SMART nie może go sprzedać.</Text>
+          <Text style={styles.smartNotice}>SMART COIN BUILDER ma zwiększać liczbę coinów, nie zamieniać portfela w USDT. Minimum 90% każdego coina pozostaje CORE/HOLD. Maks. 10% może pracować w cyklu: lokalna górka → mały SELL → niższy BUY BACK tylko wtedy, gdy po opłatach wraca więcej sztuk.</Text>
           {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
-          <Text style={styles.smallLabel}>Udział pozycji zarządzanej przez Smart (%)</Text>
+          <Text style={styles.smallLabel}>Working slice (%) — 1–10%, domyślnie 5%</Text>
           <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
           <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Wybrane do Smart: ${managedHoldings.length || (initialHolding ? 1 : 0)}`}</Text>
           <Text style={styles.accLine}>Zmiana ilości coina: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
           <Text style={styles.status}>{accumulationStatus}</Text>
           {smartPositionsToRender.map((position) => <View key={position.id} style={styles.positionCard}><View style={{ flex: 1 }}>
-            <Text style={styles.positionSymbol}>{position.symbol} • SMART</Text>
+            <Text style={styles.positionSymbol}>{position.symbol} • COIN BUILDER / CORE HOLD</Text>
             <Text style={styles.positionLine}>wejście {priceText(position.entryPrice)} • ruch {position.currentMovePct >= 0 ? '+' : ''}{position.currentMovePct.toFixed(4)}%</Text>
             <Text style={styles.positionLine}>est. NET PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
           </View></View>)}
