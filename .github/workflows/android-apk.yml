@@ -71,8 +71,7 @@ jobs:
           ls -lh android/app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare APK Artifact
-        run: |
-          cp android/app/build/outputs/apk/release/app-release.apk bybit-trading-app-release.apk
+        run: cp android/app/build/outputs/apk/release/app-release.apk bybit-trading-app-release.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -91,7 +90,5 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" bybit-trading-app-release.apk --clobber
           else
-            gh release create "$TAG" bybit-trading-app-release.apk \
-              --title "Bybit Trading App ${TAG}" \
-              --notes "Automatyczny build Android. Aplikacja sama sprawdza nowsze wydania i może pobrać APK do aktualizacji."
+            gh release create "$TAG" bybit-trading-app-release.apk --title "Bybit Trading App $TAG" --notes "Automatyczny build Android."
           fi
