@@ -9,7 +9,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { fetchSpotExecutions } from '../api/bybit';
+import { cancelSpotOrder, fetchSpotExecutions, fetchSpotOpenOrders } from '../api/bybit';
 import { ApiCredentials, ConnectionState, SpotExecution, WalletAccountResult } from '../api/types';
 import { AccountSummary } from '../components/AccountSummary';
 import { AssetRow, AssetSmartAutoSeed } from '../components/AssetRow';
@@ -64,7 +64,20 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
   const toggleSellLock = useCallback(async (symbol: string, locked: boolean) => {
     const next = await setCoinSellLocked(symbol, locked);
     setSellLockedSymbols(next);
-  }, []);
+
+    if (locked) {
+      try {
+        const openOrders = await fetchSpotOpenOrders(credentials, 50);
+        const targets = openOrders.filter((order) => order.symbol.toUpperCase() === symbol.toUpperCase() && order.side === 'Sell');
+        for (const order of targets) {
+          try { await cancelSpotOrder(credentials, order.symbol, order.orderId); }
+          catch { /* Zlecenie mogło zostać wykonane/anulowane pomiędzy odczytem i anulowaniem. */ }
+        }
+      } catch {
+        // Blokada lokalna pozostaje aktywna nawet przy chwilowym błędzie pobrania zleceń.
+      }
+    }
+  }, [credentials]);
 
   const refreshAll = () => {
     onRefresh();
