@@ -1028,7 +1028,10 @@ export const TradeScreen: React.FC<Props> = ({
             // only watches positions created in the current process.
             // Strategic CORE is accumulation-only. Never harvest/sell BTC/ETH/SOL/XRP/
             // PEPE/FLOKI/VELO to create USDT. Profitable USDT cycles fund dip purchases instead.
-            if (!accumulationStopRef.current) await tryBuyStrategicDip();
+            if (!accumulationStopRef.current) {
+              await tryStartAccumulation(); // accumulation-only policy returns no CORE sell candidates
+              await tryBuyStrategicDip();
+            }
             for (const activeCycle of Array.from(accumulationRef.current.values())) {
               if (accumulationStopRef.current) break;
               await tryFinishAccumulation(activeCycle.symbol);
