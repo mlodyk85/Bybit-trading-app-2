@@ -166,6 +166,7 @@ export const TradeScreen: React.FC<Props> = ({
   const accumulationRef = useRef<Map<string, AccumulationCycle>>(new Map());
   const accumulatedCoinRef = useRef(0);
   const sellLockedSymbolsRef = useRef<string[]>([]);
+  const smartRunningRef = useRef(false);
 
   useEffect(() => {
     // Manual Trade selection is UI state only. A running bot must never lock the pair selector.
@@ -604,6 +605,57 @@ export const TradeScreen: React.FC<Props> = ({
     }
   };
 
+  const runFreeUsdtGrowthStep = async (): Promise<void> => {
+    if (smartMode !== 'assist' || smartRunningRef.current || sellBusyRef.current) return;
+
+    const trade = Math.min(maxOrderUsdt, Math.max(SMART_MIN_TRADE_USDT, toNumber(amount) || SMART_MIN_TRADE_USDT));
+    const slots = Math.max(1, Math.min(3, Math.floor(toNumber(maxSlots)) || 1));
+    const owned = livePositionsRef.current.filter((item) => !item.fromPortfolio);
+    const refreshed: TrackedPosition[] = [];
+
+    for (const position of owned) {
+      try {
+        const updated = await updateTrackedPosition(position);
+        if (updated.closed) {
+          const pnl = updated.realizedPnlUsdt || 0;
+          sessionProfitRef.current += pnl;
+          setSessionProfit(sessionProfitRef.current);
+          if (pnl > 0) {
+            cycleCountRef.current += 1;
+            setCycleCount(cycleCountRef.current);
+          }
+        } else {
+          refreshed.push(updated);
+        }
+      } catch {
+        refreshed.push(position);
+      }
+    }
+
+    const portfolioOwned = livePositionsRef.current.filter((item) => item.fromPortfolio);
+    livePositionsRef.current = [...portfolioOwned, ...refreshed];
+    setLivePositions([...livePositionsRef.current]);
+
+    const sellCandidate = refreshed.find((position) =>
+      !position.exitOrderId && position.sellReady && position.currentPnlUsdt > 0
+    );
+    if (sellCandidate) {
+      await executeAssistSell(sellCandidate);
+      return;
+    }
+
+    const free = await refreshAvailableUsdt();
+    if (free + 1e-8 < trade || refreshed.length >= slots) return;
+
+    const candidate = await scanBestCandidate();
+    if (!candidate) return;
+
+    // A core holding must not block USDT growth. Happy Hour positions are tracked
+    // independently from portfolio CORE positions, even for the same symbol.
+    const alreadyHappyOwned = refreshed.some((item) => item.symbol === candidate.market.symbol);
+    if (!alreadyHappyOwned) await buyCandidate(candidate, trade, slots);
+  };
+
   const tryStartAccumulation = async (): Promise<boolean> => {
     if (sellBusyRef.current) return false;
     const candidates = livePositionsRef.current
@@ -908,7 +960,15 @@ export const TradeScreen: React.FC<Props> = ({
               if (accumulationStopRef.current) break;
               await tryFinishAccumulation(activeCycle.symbol);
             }
-            setAccumulationStatus(`SMART COIN BUILDER: ${smartOwned.length} coinów • CORE/HOLD ≥90% • aktywne BUY BACK ${accumulationRef.current.size}. Bez potwierdzonej górki nie sprzedaję.`);
+
+            // Free USDT is a separate growth pool. It may BUY/SELL short-term positions,
+            // but it is never replenished by liquidating CORE holdings.
+            if (!accumulationStopRef.current && !smartRunningRef.current) {
+              await runFreeUsdtGrowthStep();
+            }
+
+            const freeUsdtNow = await refreshAvailableUsdt();
+            setAccumulationStatus(`SMART TOTAL CAPITAL: CORE/HOLD ${smartOwned.length} coinów • BUY BACK ${accumulationRef.current.size} • wolne USDT ${freeUsdtNow.toFixed(2)} pracują osobno. CORE nie jest źródłem USDT.`);
             await sleep(900);
           } catch (e: unknown) {
             setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
@@ -954,6 +1014,7 @@ export const TradeScreen: React.FC<Props> = ({
     accumulatedCoinRef.current = 0;
     setAccumulationCycles([]);
     setAccumulatedCoin(0);
+    smartRunningRef.current = true;
     setSmartRunning(true);
     if (smartMode === 'assist' && !accumulationRunning) startAccumulationEngine();
     setError('');
@@ -1073,7 +1134,7 @@ export const TradeScreen: React.FC<Props> = ({
             const free = await refreshAvailableUsdt();
             if (refreshed.filter((item) => !item.fromPortfolio).length < slots && free + 1e-8 >= trade) {
               const candidate = await scanBestCandidate();
-              if (candidate && livePositionsRef.current.every((item) => item.symbol !== candidate.market.symbol)) await buyCandidate(candidate, trade, slots);
+              if (candidate && livePositionsRef.current.filter((item) => !item.fromPortfolio).every((item) => item.symbol !== candidate.market.symbol)) await buyCandidate(candidate, trade, slots);
             } else if (free + 1e-8 < trade) {
               setSmartStatus(`HAPPY HOUR: wolne USDT ${free.toFixed(2)} < ${trade.toFixed(2)}. Czekam bez używania kapitału Smart.`);
               await sleep(1000);
@@ -1090,6 +1151,7 @@ export const TradeScreen: React.FC<Props> = ({
         }
       }
 
+      smartRunningRef.current = false;
       setSmartRunning(false);
       stopRef.current = false;
       setSmartStatus('Happy Hour zatrzymany ręcznie.');
@@ -1196,7 +1258,7 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smartSub}>Oddzielny silnik • własne pozycje • nie uruchamia i nie zatrzymuje Happy Hour</Text>
             </View>
           </View>
-          <Text style={styles.smartNotice}>SMART COIN BUILDER ma zwiększać liczbę coinów, nie zamieniać portfela w USDT. Minimum 90% każdego coina pozostaje CORE/HOLD. Maks. 10% może pracować w cyklu: lokalna górka → mały SELL → niższy BUY BACK tylko wtedy, gdy po opłatach wraca więcej sztuk.</Text>
+          <Text style={styles.smartNotice}>SMART TOTAL CAPITAL prowadzi dwa niezależne koszyki: CORE COINS mają zwiększać liczbę sztuk, a wolne USDT mają zwiększać saldo USDT przez osobne krótkie transakcje. Bot nie sprzedaje CORE po to, żeby tworzyć USDT.</Text>
           {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
           <Text style={styles.smallLabel}>Working slice (%) — 1–10%, domyślnie 5%</Text>
           <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
@@ -1210,7 +1272,7 @@ export const TradeScreen: React.FC<Props> = ({
           </View></View>)}
           {accumulationRunning
             ? <TouchableOpacity style={styles.stopButton} onPress={stopAccumulationEngine}><Text style={styles.buttonText}>STOP SMART</Text></TouchableOpacity>
-            : <TouchableOpacity style={styles.smartButton} onPress={startAccumulationEngine}><Text style={styles.smartButtonText}>START SMART</Text></TouchableOpacity>}
+            : <TouchableOpacity style={styles.smartButton} onPress={startAccumulationEngine}><Text style={styles.smartButtonText}>START CAŁY KAPITAŁ</Text></TouchableOpacity>}
         </View>
 
         {lastAck && <View style={styles.card}><Text style={styles.cardTitle}>Ostatnie zlecenie</Text><Text style={styles.line}>{lastAck.side} {lastAck.symbol} • {lastAck.quoteAmountUsdt.toFixed(2)} USDT</Text><Text style={styles.line}>Order ID: {lastAck.orderId}</Text></View>}
