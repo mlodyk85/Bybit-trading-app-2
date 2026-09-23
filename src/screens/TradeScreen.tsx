@@ -16,10 +16,13 @@ import {
 import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { ApiCredentials, TradeAck } from '../api/types';
 import { COIN_BUILDER_SYMBOLS } from '../services/coinBuilder';
+import { loadSellLockedSymbols } from '../services/tradingPreferences';
 import {
+  cancelSpotOrder,
   fetchSpotExecutions,
   fetchSpotMarketSnapshot,
   fetchSpotMinOrderAmt,
+  fetchSpotOpenOrders,
   fetchSpotOrderExecutions,
   fetchSpotUsdtMarketCandidates,
   fetchSpotUsdtSymbols,
@@ -150,6 +153,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [accumulatedCoin, setAccumulatedCoin] = useState(0);
   const [accumulationShare, setAccumulationShare] = useState('10');
   const [managedHoldings, setManagedHoldings] = useState<AssetSmartAutoSeed[]>(initialHoldings);
+  const [sellLockedSymbols, setSellLockedSymbols] = useState<string[]>([]);
 
   const stopRef = useRef(false); // Happy Hour stop
   const accumulationStopRef = useRef(false); // Smart stop
@@ -162,6 +166,7 @@ export const TradeScreen: React.FC<Props> = ({
   const sellBusyRef = useRef(false);
   const accumulationRef = useRef<Map<string, AccumulationCycle>>(new Map());
   const accumulatedCoinRef = useRef(0);
+  const sellLockedSymbolsRef = useRef<string[]>([]);
 
   useEffect(() => {
     // Manual Trade selection is UI state only. A running bot must never lock the pair selector.
@@ -178,6 +183,8 @@ export const TradeScreen: React.FC<Props> = ({
     const value = toNumber(amount);
     if (!Number.isFinite(value) || value <= 0 || value > maxOrderUsdt) setAmount(String(Math.min(10, maxOrderUsdt)));
   }, [amount, maxOrderUsdt]);
+
+  useEffect(() => { void refreshSellLocks(); }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -232,6 +239,39 @@ export const TradeScreen: React.FC<Props> = ({
     setSymbol(next);
     setPairSearch('');
     setPairPickerOpen(false);
+  };
+
+  const refreshSellLocks = async (): Promise<string[]> => {
+    const locks = await loadSellLockedSymbols();
+    sellLockedSymbolsRef.current = locks;
+    setSellLockedSymbols(locks);
+    return locks;
+  };
+
+  const isSellLocked = (symbolInput: string): boolean =>
+    sellLockedSymbolsRef.current.includes(symbolInput.trim().toUpperCase());
+
+  const cancelLockedOpenSellOrders = async (locks: string[]): Promise<number> => {
+    if (locks.length === 0) return 0;
+    const locked = new Set(locks.map((item) => item.toUpperCase()));
+    const openOrders = await fetchSpotOpenOrders(credentials, 50);
+    const targets = openOrders.filter((order) => order.side === 'Sell' && locked.has(order.symbol.toUpperCase()));
+    let cancelled = 0;
+    for (const order of targets) {
+      try {
+        await cancelSpotOrder(credentials, order.symbol, order.orderId);
+        cancelled += 1;
+      } catch {
+        // Jeżeli zlecenie właśnie się wykonało lub zostało anulowane, kolejny refresh zsynchronizuje stan.
+      }
+    }
+    if (cancelled > 0) {
+      livePositionsRef.current = livePositionsRef.current.map((position) => locked.has(position.symbol.toUpperCase())
+        ? { ...position, exitOrderId: undefined, targetSellPrice: undefined, sellReady: false }
+        : position);
+      setLivePositions([...livePositionsRef.current]);
+    }
+    return cancelled;
   };
 
   const submit = (side: 'Buy' | 'Sell') => {
@@ -546,7 +586,7 @@ export const TradeScreen: React.FC<Props> = ({
   const tryStartAccumulation = async (): Promise<boolean> => {
     if (sellBusyRef.current) return false;
     const candidates = livePositionsRef.current
-      .filter((position) => position.fromPortfolio && COIN_BUILDER_SET.has(position.symbol) && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0 && !position.exitOrderId && !accumulationRef.current.has(position.symbol))
+      .filter((position) => position.fromPortfolio && !isSellLocked(position.symbol) && COIN_BUILDER_SET.has(position.symbol) && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0 && !position.exitOrderId && !accumulationRef.current.has(position.symbol))
       .sort((a, b) => (b.currentMovePct - b.peakMovePct) - (a.currentMovePct - a.peakMovePct));
 
     for (const position of candidates) {
@@ -768,6 +808,7 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const protectPortfolioPositionWithLimitSell = async (position: TrackedPosition): Promise<TrackedPosition> => {
+    if (isSellLocked(position.symbol)) return { ...position, exitOrderId: undefined, targetSellPrice: undefined, sellReady: false };
     if (position.exitOrderId || position.qty <= 0 || position.costUsdt <= 0) return position;
 
     // Put the profit-taking order on Bybit itself. It remains active even when the phone
@@ -813,6 +854,9 @@ export const TradeScreen: React.FC<Props> = ({
 
     void (async () => {
       try {
+        const initialLocks = await refreshSellLocks();
+        const cancelledAtStart = await cancelLockedOpenSellOrders(initialLocks);
+        if (cancelledAtStart > 0) setAccumulationStatus(`SMART: anulowano ${cancelledAtStart} otwarte zlecenia SELL dla zablokowanych coinów.`);
         const discovered = await discoverPortfolioSeeds();
         const requested = managedHoldings.length > 0 ? managedHoldings : (initialHolding ? [initialHolding] : []);
         const bySymbol = new Map<string, AssetSmartAutoSeed>();
@@ -861,6 +905,12 @@ export const TradeScreen: React.FC<Props> = ({
 
         while (!accumulationStopRef.current) {
           try {
+            const previousLocksKey = sellLockedSymbolsRef.current.join('|');
+            const currentLocks = await refreshSellLocks();
+            if (currentLocks.join('|') !== previousLocksKey) {
+              const cancelled = await cancelLockedOpenSellOrders(currentLocks);
+              if (cancelled > 0) setAccumulationStatus(`SMART: blokada SELL aktywna — anulowano ${cancelled} zlecenia.`);
+            }
             const happyOwned = livePositionsRef.current.filter((position) => !position.fromPortfolio);
             const smartOwned: TrackedPosition[] = [];
             for (const position of livePositionsRef.current.filter((item) => item.fromPortfolio)) {
@@ -1166,7 +1216,8 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smartSub}>Oddzielny silnik • własne pozycje • nie uruchamia i nie zatrzymuje Happy Hour</Text>
             </View>
           </View>
-          <Text style={styles.smartNotice}>SMART działa niezależnie od Happy Hour i ręcznie wybranej pary. Każdy zarządzany coin ma własny cykl.</Text>
+          <Text style={styles.smartNotice}>SMART działa niezależnie od Happy Hour i ręcznie wybranej pary. Każdy zarządzany coin ma własny cykl. Coin z blokadą SELL jest tylko monitorowany — SMART nie może go sprzedać.</Text>
+          {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
           <Text style={styles.smallLabel}>Udział pozycji zarządzanej przez Smart (%)</Text>
           <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
           <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Wybrane do Smart: ${managedHoldings.length || (initialHolding ? 1 : 0)}`}</Text>
@@ -1241,6 +1292,7 @@ const styles = StyleSheet.create({
   accCard: { backgroundColor: '#20251A', borderWidth: 1, borderColor: '#65A30D', borderRadius: 10, padding: 10, marginTop: 12 },
   accTitle: { color: '#A3E635', fontSize: 11, fontWeight: '900' },
   accLine: { color: '#D4D4D8', fontSize: 10, lineHeight: 15, marginTop: 4 },
+  sellLockInfo: { color: '#FF6B6B', fontSize: 11, fontWeight: '800', marginBottom: 8 },
   feeInfo: { color: '#A3E635', fontSize: 10, lineHeight: 15, marginTop: 10 },
   scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
   candidate: { color: '#22C55E', fontSize: 11, lineHeight: 16, marginTop: 7 },
