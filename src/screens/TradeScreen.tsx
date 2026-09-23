@@ -108,6 +108,10 @@ const ACCUMULATION_PEAK_PULLBACK_PCT = 0.50;
 const ACCUMULATION_REBUY_DROP_PCT = 0.60;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.15;
 const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
+const CORE_PROFIT_ALLOCATION_PCT = 0.50;
+const CORE_USDT_RESERVE_PCT = 0.40;
+const CORE_DIP_24H_PCT = -2.0;
+const CORE_BOUNCE_FROM_LOW_PCT = 0.30;
 
 export const TradeScreen: React.FC<Props> = ({
   credentials,
@@ -167,6 +171,9 @@ export const TradeScreen: React.FC<Props> = ({
   const accumulatedCoinRef = useRef(0);
   const sellLockedSymbolsRef = useRef<string[]>([]);
   const smartRunningRef = useRef(false);
+  // Only REALIZED positive USDT profit feeds strategic accumulation.
+  // Existing CORE balances are never sold to finance this pool.
+  const coreAccumulationFundRef = useRef(0);
 
   useEffect(() => {
     // Manual Trade selection is UI state only. A running bot must never lock the pair selector.
@@ -583,6 +590,7 @@ export const TradeScreen: React.FC<Props> = ({
       livePositionsRef.current = livePositionsRef.current.filter((item) => item.id !== position.id);
       setLivePositions([...livePositionsRef.current]);
       if (pnl > 0) {
+        creditCoreFund(pnl);
         cycleCountRef.current += 1;
         sessionProfitRef.current += pnl;
         setCycleCount(cycleCountRef.current);
@@ -644,6 +652,8 @@ export const TradeScreen: React.FC<Props> = ({
       return;
     }
 
+    if (await tryBuyStrategicDip()) return;
+
     const free = await refreshAvailableUsdt();
     if (free + 1e-8 < trade || refreshed.length >= slots) return;
 
@@ -656,10 +666,71 @@ export const TradeScreen: React.FC<Props> = ({
     if (!alreadyHappyOwned) await buyCandidate(candidate, trade, slots);
   };
 
+  const creditCoreFund = (realizedPnlUsdt: number) => {
+    if (!Number.isFinite(realizedPnlUsdt) || realizedPnlUsdt <= 0) return;
+    coreAccumulationFundRef.current += realizedPnlUsdt * CORE_PROFIT_ALLOCATION_PCT;
+  };
+
+  const tryBuyStrategicDip = async (): Promise<boolean> => {
+    if (sellBusyRef.current || coreAccumulationFundRef.current <= 0) return false;
+    const free = await refreshAvailableUsdt();
+    const reserve = free * CORE_USDT_RESERVE_PCT;
+    const spendable = Math.max(0, free - reserve);
+    if (spendable <= 0) return false;
+
+    const snapshots: SpotMarketSnapshot[] = [];
+    for (const coreSymbol of COIN_BUILDER_SYMBOLS) {
+      try { snapshots.push(await fetchSpotMarketSnapshot(coreSymbol)); } catch { /* retry next loop */ }
+    }
+
+    // Dip + bounce confirmation: negative 24h move, price close to the 24h low,
+    // but already above the low. This avoids buying solely because price is falling.
+    const candidate = snapshots
+      .filter((item) => {
+        if (item.lastPrice <= 0 || item.low24h <= 0 || item.high24h <= item.low24h) return false;
+        const bouncePct = ((item.lastPrice - item.low24h) / item.low24h) * 100;
+        const rangeLocation = (item.lastPrice - item.low24h) / (item.high24h - item.low24h);
+        return item.change24hPct <= CORE_DIP_24H_PCT
+          && bouncePct >= CORE_BOUNCE_FROM_LOW_PCT
+          && rangeLocation <= 0.35;
+      })
+      .sort((a, b) => a.change24hPct - b.change24hPct)[0];
+    if (!candidate) return false;
+
+    const exchangeMin = await fetchSpotMinOrderAmt(candidate.symbol);
+    const minOrder = Math.max(exchangeMin * 1.02, 5);
+    const budget = Math.min(coreAccumulationFundRef.current, spendable, maxOrderUsdt);
+    if (budget + 1e-8 < minOrder) return false;
+
+    const ack = await placeSpotMarketOrder(credentials, candidate.symbol, 'Buy', budget, maxOrderUsdt);
+    const fill = await waitForSpotFill(credentials, ack.orderId);
+    const baseCoin = candidate.symbol.replace(/USDT$/, '');
+    const netQty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
+    const feeUsdt = (fill.feeByCurrency.USDT || 0) + (fill.feeByCurrency[baseCoin] || 0) * fill.avgPrice;
+    const actualCost = fill.quoteValue + feeUsdt;
+    coreAccumulationFundRef.current = Math.max(0, coreAccumulationFundRef.current - actualCost);
+
+    const existing = livePositionsRef.current.find((item) => item.fromPortfolio && item.symbol === candidate.symbol);
+    if (existing) {
+      const nextQty = existing.qty + netQty;
+      const nextCost = existing.costUsdt + actualCost;
+      livePositionsRef.current = livePositionsRef.current.map((item) => item.id === existing.id ? {
+        ...item,
+        qty: nextQty,
+        costUsdt: nextCost,
+        entryPrice: nextQty > 0 ? nextCost / nextQty : item.entryPrice,
+      } : item);
+      setLivePositions([...livePositionsRef.current]);
+    }
+    setAccumulationStatus(`CORE BUY ${candidate.symbol}: +${netQty.toPrecision(7)} za ${actualCost.toFixed(2)} USDT z wypracowanego zysku. Rezerwa USDT pozostaje nienaruszona.`);
+    await refreshAvailableUsdt();
+    return true;
+  };
+
   const tryStartAccumulation = async (): Promise<boolean> => {
     if (sellBusyRef.current) return false;
     const candidates = livePositionsRef.current
-      .filter((position) => position.fromPortfolio && !isSellLocked(position.symbol) && COIN_BUILDER_SET.has(position.symbol) && position.qty > 0 && position.entryPrice > 0 && position.currentPnlUsdt > 0 && !position.exitOrderId && !accumulationRef.current.has(position.symbol))
+      .filter((position) => position.fromPortfolio && false)
       .sort((a, b) => (b.currentMovePct - b.peakMovePct) - (a.currentMovePct - a.peakMovePct));
 
     for (const position of candidates) {
@@ -955,7 +1026,9 @@ export const TradeScreen: React.FC<Props> = ({
             // First harvest profitable wallet positions, then handle any pending rebuy cycle.
             // This prevents an old position from sitting in profit after an upgrade while SMART
             // only watches positions created in the current process.
-            if (!accumulationStopRef.current) await tryStartAccumulation();
+            // Strategic CORE is accumulation-only. Never harvest/sell BTC/ETH/SOL/XRP/
+            // PEPE/FLOKI/VELO to create USDT. Profitable USDT cycles fund dip purchases instead.
+            if (!accumulationStopRef.current) await tryBuyStrategicDip();
             for (const activeCycle of Array.from(accumulationRef.current.values())) {
               if (accumulationStopRef.current) break;
               await tryFinishAccumulation(activeCycle.symbol);
@@ -968,7 +1041,7 @@ export const TradeScreen: React.FC<Props> = ({
             }
 
             const freeUsdtNow = await refreshAvailableUsdt();
-            setAccumulationStatus(`SMART TOTAL CAPITAL: CORE/HOLD ${smartOwned.length} coinów • BUY BACK ${accumulationRef.current.size} • wolne USDT ${freeUsdtNow.toFixed(2)} pracują osobno. CORE nie jest źródłem USDT.`);
+            setAccumulationStatus(`SMART TOTAL CAPITAL: CORE/HOLD ${smartOwned.length} • fundusz dokupienia ${coreAccumulationFundRef.current.toFixed(4)} USDT • wolne USDT ${freeUsdtNow.toFixed(2)}. CORE: tylko gromadzenie, bez automatycznej sprzedaży.`);
             await sleep(900);
           } catch (e: unknown) {
             setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
