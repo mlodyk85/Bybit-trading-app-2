@@ -250,8 +250,6 @@ export const TradeScreen: React.FC<Props> = ({
     setSellLockedSymbols(locks);
     return locks;
   };
-    sellLockedSymbolsRef.current.includes(symbolInput.trim().toUpperCase());
-
   const cancelLockedOpenSellOrders = async (locks: string[]): Promise<number> => {
     if (locks.length === 0) return 0;
     const locked = new Set(locks.map((item) => item.toUpperCase()));
