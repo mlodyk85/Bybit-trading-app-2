@@ -82,6 +82,7 @@ interface AccumulationCycle {
 
 const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'SUIUSDT'];
 const CORE_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT']);
+const STRATEGIC_CORE_SYMBOLS = new Set<string>(COIN_BUILDER_SYMBOLS);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
@@ -422,6 +423,8 @@ export const TradeScreen: React.FC<Props> = ({
     let bestObserved: { symbol: string; momentum: number; spread: number } | null = null;
 
     for (const now of latest) {
+      // Strategic CORE is excluded at scanner level as well as execution level.
+      if (STRATEGIC_CORE_SYMBOLS.has(now.symbol)) continue;
       const history = tracks.get(now.symbol) || [];
       if (history.length < 4) continue;
       const first = history[0];
@@ -504,6 +507,12 @@ export const TradeScreen: React.FC<Props> = ({
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
     if (!candidate || stopRef.current || smartMode !== 'assist') return;
+    // Hard safety wall: Happy Hour / USDT-growth must never trade strategic CORE.
+    // CORE is purchased only by tryBuyStrategicDip() from realized-profit allocation.
+    if (STRATEGIC_CORE_SYMBOLS.has(candidate.market.symbol)) {
+      setSmartStatus(`CORE LOCK: ${candidate.market.symbol} pominięty przez silnik handlowy — tylko akumulacja.`);
+      return;
+    }
     if (livePositionsRef.current.filter((item) => !item.fromPortfolio).length >= slots) return;
 
     setBusy(true);
