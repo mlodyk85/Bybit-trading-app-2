@@ -258,7 +258,7 @@ export async function fetchSpotMarketSnapshot(symbolInput: string): Promise<Spot
   return snapshot;
 }
 
-export async function fetchSpotUsdtMarketCandidates(limit = 40): Promise<SpotMarketCandidate[]> {
+export async function fetchSpotUsdtMarketCandidates(limit = 240): Promise<SpotMarketCandidate[]> {
   const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'spot' });
   const stablePrefixes = ['USDC', 'USDE', 'DAI', 'FDUSD', 'TUSD', 'USDP', 'PYUSD'];
   const marketConfig = await loadMarketScopeConfig();
@@ -274,9 +274,9 @@ export async function fetchSpotUsdtMarketCandidates(limit = 40): Promise<SpotMar
       return { ...snapshot, spreadPct } as SpotMarketCandidate;
     })
     .filter((item): item is SpotMarketCandidate => item !== null)
-    .filter((item) => item.turnover24h >= 500000 && item.spreadPct >= 0 && item.spreadPct <= 0.5)
+    .filter((item) => item.turnover24h >= 100000 && item.spreadPct >= 0 && item.spreadPct <= 0.8)
     .sort((a, b) => b.turnover24h - a.turnover24h)
-    .slice(0, Math.max(5, Math.min(80, limit)));
+    .slice(0, Math.max(5, Math.min(300, limit)));
 }
 
 export async function fetchSpotLastPrice(symbolInput: string): Promise<number> {
