@@ -102,10 +102,6 @@ const MARKET_ROUND_TRIP_FEE_PCT = SPOT_TAKER_FEE_PCT * 2;
 const SLIPPAGE_SAFETY_PCT = 0.04;
 const EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const SMART_MIN_TRADE_USDT = 10;
-const ACCUMULATION_DEFAULT_SHARE = 0.05;
-const ACCUMULATION_MIN_PROFIT_PCT = 2.00;
-const ACCUMULATION_PEAK_PULLBACK_PCT = 0.50;
-const ACCUMULATION_REBUY_DROP_PCT = 0.60;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.15;
 const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const CORE_PROFIT_ALLOCATION_PCT = 0.50;
@@ -254,8 +250,6 @@ export const TradeScreen: React.FC<Props> = ({
     setSellLockedSymbols(locks);
     return locks;
   };
-
-  const isSellLocked = (symbolInput: string): boolean =>
     sellLockedSymbolsRef.current.includes(symbolInput.trim().toUpperCase());
 
   const cancelLockedOpenSellOrders = async (locks: string[]): Promise<number> => {
