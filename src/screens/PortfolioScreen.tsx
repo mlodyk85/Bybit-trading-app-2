@@ -15,6 +15,7 @@ import { AccountSummary } from '../components/AccountSummary';
 import { AssetRow, AssetSmartAutoSeed } from '../components/AssetRow';
 import { ConnectionStatus } from '../components/ConnectionStatus';
 import { filterNonZeroAssets, formatTime } from '../utils/format';
+import { loadSellLockedSymbols, setCoinSellLocked } from '../services/tradingPreferences';
 
 interface PortfolioScreenProps {
   credentials: ApiCredentials;
@@ -44,6 +45,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
   const nonZeroAssets = filterNonZeroAssets(account?.coin);
   const [executions, setExecutions] = useState<SpotExecution[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [sellLockedSymbols, setSellLockedSymbols] = useState<string[]>([]);
 
   const loadExecutions = useCallback(async () => {
     setHistoryLoading(true);
@@ -57,6 +59,12 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
   }, [credentials]);
 
   useEffect(() => { void loadExecutions(); }, [loadExecutions]);
+  useEffect(() => { void loadSellLockedSymbols().then(setSellLockedSymbols); }, []);
+
+  const toggleSellLock = useCallback(async (symbol: string, locked: boolean) => {
+    const next = await setCoinSellLocked(symbol, locked);
+    setSellLockedSymbols(next);
+  }, []);
 
   const refreshAll = () => {
     onRefresh();
@@ -68,7 +76,16 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
       <FlatList
         data={nonZeroAssets}
         keyExtractor={(item) => item.coin}
-        renderItem={({ item }) => <AssetRow asset={item} executions={executions} onOpenTrade={onOpenSmartAuto} />}
+        renderItem={({ item }) => {
+          const itemSymbol = `${item.coin.toUpperCase()}USDT`;
+          return <AssetRow
+            asset={item}
+            executions={executions}
+            onOpenTrade={onOpenSmartAuto}
+            sellLocked={sellLockedSymbols.includes(itemSymbol)}
+            onToggleSellLock={(symbol, locked) => void toggleSellLock(symbol, locked)}
+          />;
+        }}
         contentContainerStyle={styles.scrollContent}
         refreshControl={<RefreshControl refreshing={isRefreshing || historyLoading} onRefresh={refreshAll} tintColor="#F0B90B" colors={['#F0B90B']} />}
         ListHeaderComponent={<>
@@ -86,7 +103,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
           </View>
           <View style={styles.infoBox}>
             <Text style={styles.infoTitle}>Smart Accumulate — każde aktywo</Text>
-            <Text style={styles.infoText}>Każdy coin z portfela może być zarządzany niezależnie. Bot operuje wyłącznie przypisaną partią aktywa; pozostałe saldo traktowane jest jako rezerwa i nie może być sprzedane przez tę operację.</Text>
+            <Text style={styles.infoText}>Każdy coin z portfela może być zarządzany niezależnie. Użyj „BLOKUJ SELL”, aby SMART nie mógł wystawiać ani wykonywać automatycznej sprzedaży wybranego coina. Blokada jest zapamiętywana po restarcie aplikacji.</Text>
           </View>
           <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Aktywa na koncie</Text><Text style={styles.sectionSubtitle}>{nonZeroAssets.length} {nonZeroAssets.length === 1 ? 'aktywum' : 'aktywów'}</Text></View>
         </>}
