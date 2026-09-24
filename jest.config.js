@@ -1,11 +1,13 @@
 module.exports = {
-  preset: 'jest-expo',
+  preset: 'ts-jest',
+  testEnvironment: 'node',
   transform: {
-    '^.+\\.[jt]sx?$': 'babel-jest',
+    '^.+\\.tsx?$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
+    '^.+\\.jsx?$': 'babel-jest',
   },
   transformIgnorePatterns: [
-    'node_modules/(?!((jest-)?react-native|@react-native(-community)?)|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|react-navigation|@react-navigation/.*|@unimodules/.*|unimodules|sentry-expo|native-base|react-native-svg|crypto-es)',
+    'node_modules/.pnpm/(?!(crypto-es)@)',
+    'node_modules/(?!crypto-es|.pnpm)',
   ],
-  setupFilesAfterEnv: [],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx'],
 };
