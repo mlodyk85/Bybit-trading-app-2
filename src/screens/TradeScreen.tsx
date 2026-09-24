@@ -1122,7 +1122,7 @@ export const TradeScreen: React.FC<Props> = ({
     setAccumulatedCoin(0);
     smartRunningRef.current = true;
     setSmartRunning(true);
-    if (smartMode === 'assist' && !accumulationRunning) startAccumulationEngine();
+    // Happy Hour and SMART are intentionally independent. Never start SMART from Happy Hour.
     setError('');
     setCycleCount(0);
     setScanCount(0);
