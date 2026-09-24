@@ -1,5 +1,7 @@
 import { buildQueryString, signBybitPostBody, signBybitRequest } from './signing';
 import { filterSymbolsByScope, loadMarketScopeConfig } from '../services/marketScope';
+import { assertAutonomousSellAllowed, TradingEngineOwner } from '../services/tradingPolicy';
+import { SpotTradingRules } from '../services/executionMath';
 import {
   ApiCredentials,
   BybitApiResponse,
@@ -291,6 +293,15 @@ async function fetchSpotInstrument(symbolInput: string): Promise<SpotInstrument>
   return instrument;
 }
 
+export async function fetchSpotTradingRules(symbolInput: string): Promise<SpotTradingRules> {
+  const instrument = await fetchSpotInstrument(symbolInput);
+  return {
+    qtyStep: Number(instrument.lotSizeFilter?.qtyStep || instrument.lotSizeFilter?.basePrecision || '0.00000001'),
+    minOrderQty: Number(instrument.lotSizeFilter?.minOrderQty || '0'),
+    minNotional: Number(instrument.lotSizeFilter?.minOrderAmt || '0'),
+  };
+}
+
 export async function fetchSpotMinOrderAmt(symbolInput: string): Promise<number> {
   const instrument = await fetchSpotInstrument(symbolInput);
   const minOrderAmt = Number(instrument.lotSizeFilter?.minOrderAmt || '0');
@@ -371,9 +382,11 @@ function decimalPlaces(value?: string): number {
 export async function placeSpotMarketSellBase(
   credentials: ApiCredentials,
   symbolInput: string,
-  baseQtyInput: number
+  baseQtyInput: number,
+  owner: TradingEngineOwner = 'manual',
 ): Promise<CreateSpotOrderResult> {
   const symbol = symbolInput.trim().toUpperCase();
+  assertAutonomousSellAllowed(owner, symbol);
   if (!Number.isFinite(baseQtyInput) || baseQtyInput <= 0) throw new BybitError('Nieprawidłowa ilość aktywa do sprzedaży.', 'INVALID_QTY');
 
   const instrument = await fetchSpotInstrument(symbol);
@@ -419,9 +432,11 @@ export async function placeSpotLimitSellBase(
   credentials: ApiCredentials,
   symbolInput: string,
   baseQtyInput: number,
-  limitPriceInput: number
+  limitPriceInput: number,
+  owner: TradingEngineOwner = 'manual',
 ): Promise<CreateSpotOrderResult & { normalizedPrice: number; normalizedQty: number }> {
   const symbol = symbolInput.trim().toUpperCase();
+  assertAutonomousSellAllowed(owner, symbol);
   if (!Number.isFinite(baseQtyInput) || baseQtyInput <= 0) throw new BybitError('Nieprawidłowa ilość aktywa do sprzedaży.', 'INVALID_QTY');
   if (!Number.isFinite(limitPriceInput) || limitPriceInput <= 0) throw new BybitError('Nieprawidłowa cena LIMIT SELL.', 'INVALID_PRICE');
 
