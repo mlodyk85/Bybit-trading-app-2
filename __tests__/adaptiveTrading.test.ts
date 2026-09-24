@@ -72,7 +72,7 @@ describe('Capital reserve', () => {
   });
 });
 
-describe('AI Advisor shadow boundary', () => {
+describe('AI Advisor bounded live authorization', () => {
   const advice = {
     decision: 'BUY' as const, confidence: 0.8, expectedMovePct: 0.9, riskMultiplier: 0.7,
     tpMultiplier: 1.2, trailingMultiplier: 0.8, validForSeconds: 30,
@@ -85,14 +85,16 @@ describe('AI Advisor shadow boundary', () => {
     expect(validateAiAdvice({ ...advice, decision: 'SELL' })).toBeNull();
   });
 
-  it('cannot authorize a LIVE order in build 180', () => {
+  it('authorizes only high-confidence non-CORE BUY advice', () => {
     const snapshot = {
       symbol: 'ARBUSDT', regime: 'TREND_UP' as const, strategy: 'MOMENTUM_BREAKOUT' as const,
       price: 1, spreadPct: 0.05, change24hPct: 2, windowMomentumPct: 0.2,
       shortMomentumPct: 0.1, turnover24h: 5_000_000, volatilityPct: 0.5,
       estimatedRoundTripCostPct: 0.25, openPositions: 0, freeUsdtAfterReserve: 20,
     };
-    expect(aiAdviceCanAuthorizeLiveTrade(snapshot, advice)).toBe(false);
-    expect(aiAdviceCanAuthorizeLiveTrade({ ...snapshot, symbol: 'BTCUSDT' }, advice)).toBe(false);
+    expect(aiAdviceCanAuthorizeLiveTrade(snapshot, advice, 0.72)).toBe(true);
+    expect(aiAdviceCanAuthorizeLiveTrade(snapshot, { ...advice, confidence: 0.60 }, 0.72)).toBe(false);
+    expect(aiAdviceCanAuthorizeLiveTrade(snapshot, { ...advice, decision: 'WAIT' }, 0.72)).toBe(false);
+    expect(aiAdviceCanAuthorizeLiveTrade({ ...snapshot, symbol: 'BTCUSDT' }, advice, 0.72)).toBe(false);
   });
 });
