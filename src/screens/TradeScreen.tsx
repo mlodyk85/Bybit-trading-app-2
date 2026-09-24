@@ -41,7 +41,7 @@ import {
 import { rankAdaptiveOpportunities, MarketRegime, EntryStrategy, dynamicExitPolicy } from '../services/adaptiveTradingEngine';
 import { CapitalManager, DEFAULT_CAPITAL_POLICY } from '../services/capitalManager';
 import { planSpotCycleSizing, passesNetProfitGate } from '../services/executionMath';
-import { appendAiShadowRecord, loadAiAdvisorConfig, requestAiAdvice } from '../services/aiAdvisor';
+import { aiAdviceCanAuthorizeLiveTrade, appendAiShadowRecord, loadAiAdvisorConfig, requestAiAdvice } from '../services/aiAdvisor';
 
 interface Props {
   credentials: ApiCredentials;
@@ -481,10 +481,19 @@ export const TradeScreen: React.FC<Props> = ({
         };
         const advice = await requestAiAdvice(snapshot, aiConfig);
         if (advice) {
-          setAiAdvisorStatus(`AI SHADOW: ${advice.decision} • pewność ${(advice.confidence * 100).toFixed(0)}% • ryzyko x${advice.riskMultiplier.toFixed(2)} • ${advice.reasons[0] || 'brak opisu'}`);
+          const autoAuthorized = aiConfig.mode === 'auto' && aiAdviceCanAuthorizeLiveTrade(snapshot, advice, aiConfig.minConfidence);
+          setAiAdvisorStatus(`AI ${aiConfig.mode === 'auto' ? 'AUTO' : 'SHADOW'}: ${advice.decision} • pewność ${(advice.confidence * 100).toFixed(0)}% • ryzyko x${advice.riskMultiplier.toFixed(2)} • ${advice.reasons[0] || 'brak opisu'}`);
           await appendAiShadowRecord({ id: `ai-${Date.now()}-${snapshot.symbol}`, createdAt: Date.now(), snapshot, advice, localDecision: 'BUY' });
+          if (aiConfig.mode === 'auto' && !autoAuthorized) {
+            setScanInfo(`AI VETO ${snapshot.symbol} • ${advice.decision} • pewność ${(advice.confidence * 100).toFixed(0)}% — brak zlecenia`);
+            return null;
+          }
         } else {
-          setAiAdvisorStatus('AI SHADOW: brak poprawnej odpowiedzi/timeout — lokalny silnik działa bez zmian.');
+          setAiAdvisorStatus(`AI ${aiConfig.mode === 'auto' ? 'AUTO' : 'SHADOW'}: brak poprawnej odpowiedzi/timeout.`);
+          if (aiConfig.mode === 'auto') {
+            setScanInfo('AI AUTO: brak odpowiedzi — fail-safe, brak zlecenia.');
+            return null;
+          }
         }
       } else {
         setAiAdvisorStatus('AI SHADOW: wyłączony w Ustawieniach.');
