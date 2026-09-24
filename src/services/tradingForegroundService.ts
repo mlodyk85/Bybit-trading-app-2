@@ -5,7 +5,8 @@ type TradingEngine = 'happy-hour' | 'smart';
 const activeEngines = new Set<TradingEngine>();
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const keepAliveTask = async ({ delay }: { delay: number }) => {
+const keepAliveTask = async (taskData?: { delay: number }) => {
+  const delay = taskData?.delay ?? 15000;
   while (BackgroundService.isRunning()) {
     await sleep(delay);
   }
