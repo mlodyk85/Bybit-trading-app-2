@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   ScrollView,
+  Switch,
   StyleSheet,
   Text,
   TextInput,
@@ -14,6 +15,7 @@ import { ApiCredentials, ConnectionState } from '../api/types';
 import { AutoRefreshInterval } from '../hooks/useBybitAccount';
 import { checkLatestUpdate, downloadAndInstallUpdate } from '../update/AppUpdater';
 import { APP_BUILD, APP_VERSION } from '../version';
+import { loadAiAdvisorConfig, saveAiAdvisorConfig } from '../services/aiAdvisor';
 
 interface SettingsScreenProps {
   credentials: ApiCredentials | null;
@@ -46,8 +48,22 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [orderLimitText, setOrderLimitText] = useState(String(maxOrderUsdt));
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiEndpoint, setAiEndpoint] = useState('');
+  const [aiSaving, setAiSaving] = useState(false);
 
   useEffect(() => setOrderLimitText(String(maxOrderUsdt)), [maxOrderUsdt]);
+  useEffect(() => { let mounted = true; void loadAiAdvisorConfig().then((config) => { if (mounted) { setAiEnabled(config.enabled); setAiEndpoint(config.endpointUrl); } }); return () => { mounted = false; }; }, []);
+
+  const saveAiConfig = async () => {
+    setAiSaving(true);
+    try {
+      await saveAiAdvisorConfig({ enabled: aiEnabled, endpointUrl: aiEndpoint, timeoutMs: 4500 });
+      Alert.alert('AI Advisor', aiEnabled ? 'Włączono bezpieczny tryb SHADOW. AI nie wykonuje zleceń.' : 'AI Advisor jest wyłączony.');
+    } catch (error: unknown) {
+      Alert.alert('Nie zapisano AI Advisor', error instanceof Error ? error.message : 'Nieprawidłowa konfiguracja.');
+    } finally { setAiSaving(false); }
+  };
 
   const handleCheckUpdate = async () => {
     if (isCheckingUpdate || isInstallingUpdate) return;
@@ -187,6 +203,23 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
       </View>
 
       <View style={styles.section}>
+        <View style={styles.aiHeader}>
+          <View style={styles.aiHeaderText}>
+            <Text style={styles.sectionTitle}>AI Strategy Advisor</Text>
+            <Text style={styles.aiBadge}>SHADOW ONLY</Text>
+          </View>
+          <Switch value={aiEnabled} onValueChange={setAiEnabled} />
+        </View>
+        <Text style={styles.updateHint}>AI porównuje swoją ocenę z decyzją lokalnego silnika, ale build 180 nie pozwala AI składać zleceń, sprzedawać CORE ani zwiększać ryzyka.</Text>
+        <Text style={styles.inputLabel}>HTTPS endpoint bezpiecznego backendu</Text>
+        <TextInput style={styles.input} value={aiEndpoint} onChangeText={setAiEndpoint} autoCapitalize="none" autoCorrect={false} placeholder="https://twoj-serwer.example/ai/advice" placeholderTextColor="#666666" />
+        <Text style={styles.aiWarning}>Nie wpisuj tutaj klucza OpenAI. Klucz musi być zapisany wyłącznie jako sekret środowiskowy backendu.</Text>
+        <TouchableOpacity style={[styles.limitButton, aiSaving && styles.disabledButton]} onPress={saveAiConfig} disabled={aiSaving}>
+          {aiSaving ? <ActivityIndicator color="#000000" /> : <Text style={styles.limitButtonText}>Zapisz konfigurację AI</Text>}
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.section}>
         <Text style={styles.sectionTitle}>Status Połączenia API</Text>
         <View style={styles.statusBox}>
           <Text style={styles.statusLabel}>Stan:</Text>
@@ -276,4 +309,8 @@ const styles = StyleSheet.create({
   deleteButton: { backgroundColor: '#FF5252', borderRadius: 6, paddingVertical: 12, alignItems: 'center' },
   deleteButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
   disabledButton: { opacity: 0.5 },
+  aiHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  aiHeaderText: { flex: 1 },
+  aiBadge: { color: '#00E5FF', fontSize: 10, fontWeight: '900', marginTop: -8, marginBottom: 10 },
+  aiWarning: { color: '#FFB74D', fontSize: 11, lineHeight: 16, marginTop: 8 },
 });

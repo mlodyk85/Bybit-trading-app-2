@@ -24,6 +24,7 @@ import {
   fetchSpotExecutions,
   fetchSpotMarketSnapshot,
   fetchSpotMinOrderAmt,
+  fetchSpotTradingRules,
   fetchSpotOpenOrders,
   fetchSpotOrderExecutions,
   fetchSpotUsdtMarketCandidates,
@@ -37,6 +38,10 @@ import {
   summarizeSpotExecutions,
   waitForSpotFill,
 } from '../api/bybit';
+import { rankAdaptiveOpportunities, MarketRegime, EntryStrategy, dynamicExitPolicy } from '../services/adaptiveTradingEngine';
+import { CapitalManager, DEFAULT_CAPITAL_POLICY } from '../services/capitalManager';
+import { planSpotCycleSizing, passesNetProfitGate } from '../services/executionMath';
+import { appendAiShadowRecord, loadAiAdvisorConfig, requestAiAdvice } from '../services/aiAdvisor';
 
 interface Props {
   credentials: ApiCredentials;
@@ -54,6 +59,9 @@ interface SmartCandidateScore {
   windowMomentumPct: number;
   shortMomentumPct: number;
   score: number;
+  regime: MarketRegime;
+  strategy: EntryStrategy;
+  volatilityPct: number;
 }
 
 interface TrackedPosition {
@@ -69,6 +77,9 @@ interface TrackedPosition {
   fromPortfolio?: boolean;
   exitOrderId?: string;
   targetSellPrice?: number;
+  trailArmPct?: number;
+  trailDropPct?: number;
+  trailingExit?: boolean;
   closed?: boolean;
   realizedPnlUsdt?: number;
 }
@@ -83,17 +94,12 @@ interface AccumulationCycle {
 }
 
 const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'SUIUSDT'];
-const CORE_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'LINKUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT']);
 const STRATEGIC_CORE_SYMBOLS = new Set<string>(COIN_BUILDER_SYMBOLS);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const toNumber = (value: string) => Number(value.replace(',', '.'));
 const priceText = (value: number) => value >= 1000 ? value.toFixed(2) : value >= 1 ? value.toFixed(5) : value.toFixed(8);
 const SCAN_SAMPLES = 9;
 const SCAN_INTERVAL_MS = 1250;
-const BUY_DIP_MIN_PCT = -0.12;
-const BUY_DIP_MAX_PCT = -2.50;
-const BUY_REVERSAL_PCT = 0.025;
-const MAX_SPREAD_PCT = 0.32;
 // Safety-first thresholds. The bot never intentionally triggers a SELL at break-even.
 const AUTO_SELL_PROFIT_PCT = 0.35;
 const AUTO_SELL_MIN_NET_USDT = 0.01;
@@ -138,7 +144,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [targetProfit, setTargetProfit] = useState('0');
   const [maxLoss, setMaxLoss] = useState('2');
   const [maxCycles, setMaxCycles] = useState('1000');
-  const [maxSlots, setMaxSlots] = useState('6');
+  const [maxSlots, setMaxSlots] = useState('2');
   const [shadowCapital, setShadowCapital] = useState('25');
   const [shadowUsdt, setShadowUsdt] = useState(25);
   const [availableUsdt, setAvailableUsdt] = useState(0);
@@ -148,6 +154,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [smartStatus, setSmartStatus] = useState('Gotowy');
   const [scanInfo, setScanInfo] = useState('');
   const [activeScore, setActiveScore] = useState<SmartCandidateScore | null>(null);
+  const [aiAdvisorStatus, setAiAdvisorStatus] = useState('AI SHADOW: wyłączony');
   const [shadowPositions, setShadowPositions] = useState<TrackedPosition[]>([]);
   const [livePositions, setLivePositions] = useState<TrackedPosition[]>([]);
   const [accumulationCycles, setAccumulationCycles] = useState<AccumulationCycle[]>([]);
@@ -169,9 +176,11 @@ export const TradeScreen: React.FC<Props> = ({
   const accumulatedCoinRef = useRef(0);
   const sellLockedSymbolsRef = useRef<string[]>([]);
   const smartRunningRef = useRef(false);
+  const accumulationRunningRef = useRef(false);
   // Only REALIZED positive USDT profit feeds strategic accumulation.
   // Existing CORE balances are never sold to finance this pool.
   const coreAccumulationFundRef = useRef(0);
+  const capitalManagerRef = useRef(new CapitalManager(DEFAULT_CAPITAL_POLICY));
 
   useEffect(() => {
     // Manual Trade selection is UI state only. A running bot must never lock the pair selector.
@@ -190,6 +199,14 @@ export const TradeScreen: React.FC<Props> = ({
   }, [amount, maxOrderUsdt]);
 
   useEffect(() => { void refreshSellLocks(); }, []);
+
+  useEffect(() => () => {
+    // Abort both independent loops before React state is torn down.
+    stopRef.current = true;
+    accumulationStopRef.current = true;
+    smartRunningRef.current = false;
+    accumulationRunningRef.current = false;
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -415,7 +432,7 @@ export const TradeScreen: React.FC<Props> = ({
 
     scanCountRef.current = scanNo;
     setScanCount(scanNo);
-    const ranked: SmartCandidateScore[] = [];
+    const adaptiveRows: Array<SmartCandidateScore> = [];
     let bestObserved: { symbol: string; momentum: number; spread: number } | null = null;
 
     for (const now of latest) {
@@ -431,48 +448,47 @@ export const TradeScreen: React.FC<Props> = ({
 
       if (!bestObserved || windowMomentumPct < bestObserved.momentum) bestObserved = { symbol: now.symbol, momentum: windowMomentumPct, spread: now.spreadPct };
 
-      const isCore = CORE_SYMBOLS.has(now.symbol);
-      // Never chase a market that is already weak on the wider 24h structure.
-      // Momentum entries require a positive 24h trend; dip entries require a real rebound,
-      // not merely a falling price that happens to print one green tick.
-      if (now.spreadPct > MAX_SPREAD_PCT) continue;
-      const dipReversal = windowMomentumPct <= BUY_DIP_MIN_PCT
-        && windowMomentumPct >= BUY_DIP_MAX_PCT
-        && shortMomentumPct >= BUY_REVERSAL_PCT
-        && now.change24hPct >= -1.0;
-      // Happy Hour must also catch fast ALT/MEME continuation, not only dip reversals.
-      // Require real liquidity and acceleration so the bot does not blindly chase a single green tick.
-      const momentumContinuation = windowMomentumPct >= 0.055
-        && windowMomentumPct <= 1.25
-        && shortMomentumPct >= 0.025
-        && now.change24hPct >= 0.20
-        && now.turnover24h >= 750000;
-      const fastMomentum = windowMomentumPct >= 0.12
-        && windowMomentumPct <= 1.80
-        && shortMomentumPct >= 0.055
-        && now.turnover24h >= 1500000
-        && now.spreadPct <= 0.22;
-      if (!dipReversal && !momentumContinuation && !fastMomentum) continue;
-
-      // Spread tolerance scales with liquidity: liquid memes can be traded with a slightly wider
-      // spread, while thin markets remain excluded.
-      const dynamicMaxSpread = now.turnover24h >= 10000000 ? MAX_SPREAD_PCT : now.turnover24h >= 2000000 ? 0.24 : 0.18;
-      if (now.spreadPct > dynamicMaxSpread) continue;
-
-      const liquidityScore = Math.max(0, Math.log10(Math.max(now.turnover24h, 1)) - 5);
-      const coreQualityBonus = isCore ? 6 : 0;
-      const dipDepth = Math.abs(Math.min(0, windowMomentumPct));
-      const accelerationBonus = Math.max(0, shortMomentumPct) * 650;
-      const score = dipDepth * 150 + shortMomentumPct * 420 + accelerationBonus + liquidityScore * 3.0 + coreQualityBonus - now.spreadPct * 85;
-      ranked.push({ market: now, windowMomentumPct, shortMomentumPct, score });
+      const volatilityPct = now.low24h > 0 ? ((now.high24h - now.low24h) / now.low24h) * 100 / Math.sqrt(24) : Math.abs(windowMomentumPct);
+      adaptiveRows.push({ market: now, windowMomentumPct, shortMomentumPct, score: 0, regime: 'RANGE', strategy: 'NONE', volatilityPct });
     }
-
-    ranked.sort((a, b) => b.score - a.score);
-    const best = ranked[0] || null;
+    const ranked = rankAdaptiveOpportunities(adaptiveRows.map((row) => ({
+      symbol: row.market.symbol, change24hPct: row.market.change24hPct,
+      windowMomentumPct: row.windowMomentumPct, shortMomentumPct: row.shortMomentumPct,
+      spreadPct: row.market.spreadPct, turnover24h: row.market.turnover24h, volatilityPct: row.volatilityPct,
+    })), 2);
+    const winner = ranked[0];
+    const source = winner ? adaptiveRows.find((row) => row.market.symbol === winner.symbol) : undefined;
+    const best = winner && source ? { ...source, score: winner.score, regime: winner.regime, strategy: winner.strategy } : null;
     setActiveScore(best);
     if (best) {
-      const quality = CORE_SYMBOLS.has(best.market.symbol) ? 'CORE' : 'ALT';
-      setScanInfo(`WEJŚCIE ${best.market.symbol} • ${quality} • 24h ${best.market.change24hPct >= 0 ? '+' : ''}${best.market.change24hPct.toFixed(2)}% • ruch ${best.windowMomentumPct.toFixed(4)}% • krótki +${best.shortMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
+      setScanInfo(`WEJŚCIE ${best.market.symbol} • ${best.regime}/${best.strategy} • 24h ${best.market.change24hPct >= 0 ? '+' : ''}${best.market.change24hPct.toFixed(2)}% • ruch ${best.windowMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
+      const aiConfig = await loadAiAdvisorConfig();
+      if (aiConfig.enabled) {
+        const snapshot = {
+          symbol: best.market.symbol,
+          regime: best.regime,
+          strategy: best.strategy,
+          price: best.market.ask || best.market.lastPrice,
+          spreadPct: best.market.spreadPct,
+          change24hPct: best.market.change24hPct,
+          windowMomentumPct: best.windowMomentumPct,
+          shortMomentumPct: best.shortMomentumPct,
+          turnover24h: best.market.turnover24h,
+          volatilityPct: best.volatilityPct,
+          estimatedRoundTripCostPct: MARKET_ROUND_TRIP_FEE_PCT + best.market.spreadPct + SLIPPAGE_SAFETY_PCT,
+          openPositions: livePositionsRef.current.filter((item) => !item.fromPortfolio).length,
+          freeUsdtAfterReserve: Math.max(0, availableUsdt),
+        };
+        const advice = await requestAiAdvice(snapshot, aiConfig);
+        if (advice) {
+          setAiAdvisorStatus(`AI SHADOW: ${advice.decision} • pewność ${(advice.confidence * 100).toFixed(0)}% • ryzyko x${advice.riskMultiplier.toFixed(2)} • ${advice.reasons[0] || 'brak opisu'}`);
+          await appendAiShadowRecord({ id: `ai-${Date.now()}-${snapshot.symbol}`, createdAt: Date.now(), snapshot, advice, localDecision: 'BUY' });
+        } else {
+          setAiAdvisorStatus('AI SHADOW: brak poprawnej odpowiedzi/timeout — lokalny silnik działa bez zmian.');
+        }
+      } else {
+        setAiAdvisorStatus('AI SHADOW: wyłączony w Ustawieniach.');
+      }
     } else if (bestObserved) {
       setScanInfo(`BRAK WEJŚCIA • ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • czekam na odbicie po spadku albo potwierdzony momentum`);
     } else {
@@ -510,8 +526,11 @@ export const TradeScreen: React.FC<Props> = ({
     const conservativeExitCost = grossExitValue * (EXIT_COST_BUFFER_PCT / 100);
     const currentPnlUsdt = grossExitValue - conservativeExitCost - position.costUsdt;
     const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
-    const sellReady = !position.exitOrderId && movePct >= AUTO_SELL_PROFIT_PCT && currentPnlUsdt >= minNetProfit;
-    return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady };
+    const trailingExit = peakMovePct >= (position.trailArmPct || Number.POSITIVE_INFINITY)
+      && peakMovePct - movePct >= (position.trailDropPct || Number.POSITIVE_INFINITY)
+      && currentPnlUsdt >= minNetProfit;
+    const sellReady = ((!position.exitOrderId && movePct >= AUTO_SELL_PROFIT_PCT) || trailingExit) && currentPnlUsdt >= minNetProfit;
+    return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady, trailingExit };
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
@@ -526,15 +545,33 @@ export const TradeScreen: React.FC<Props> = ({
 
     setBusy(true);
     setError('');
+    let capitalReservationId = '';
     try {
       const free = await refreshAvailableUsdt();
-      if (free + 1e-8 < trade) {
-        setSmartStatus(`Za mało wolnych USDT (${free.toFixed(2)}). Skaner działa dalej.`);
+      const openOrders = await fetchSpotOpenOrders(credentials, 50);
+      const openBuyOrdersUsdt = openOrders.filter((order) => order.side === 'Buy').reduce((sum, order) => sum + (Number(order.qty) || 0) * (Number(order.price) || 0), 0);
+      const reservationId = `happy-buy-${candidate.market.symbol}-${Date.now()}`;
+      const active = livePositionsRef.current.filter((item) => !item.fromPortfolio).length;
+      const reserved = capitalManagerRef.current.tryReserve(reservationId, trade, {
+        walletFreeUsdt: free, openBuyOrdersUsdt, managedPositionsCostUsdt: livePositionsRef.current.reduce((sum, item) => sum + item.costUsdt, 0), smartReservedUsdt: coreAccumulationFundRef.current,
+      }, active);
+      if (!reserved) {
+        setSmartStatus(`CAPITAL RESERVE: brak bezpiecznego budżetu na ${trade.toFixed(2)} USDT.`);
         return;
       }
-      const ack = await placeSpotMarketOrder(credentials, candidate.market.symbol, 'Buy', trade, maxOrderUsdt);
+      capitalReservationId = reservationId;
+      const rules = await fetchSpotTradingRules(candidate.market.symbol);
+      const sizing = planSpotCycleSizing(free, trade, candidate.market.ask || candidate.market.lastPrice, rules);
+      if (!sizing) {
+        capitalManagerRef.current.release(reservationId);
+        setSmartStatus(`DUST GUARD: ${candidate.market.symbol} pominięty — cykl nie utworzyłby sprzedawalnej partii.`);
+        return;
+      }
+      const ack = await placeSpotMarketOrder(credentials, candidate.market.symbol, 'Buy', sizing.quoteUsdt, maxOrderUsdt);
       setLastAck(ack);
       const fill = await waitForSpotFill(credentials, ack.orderId);
+      capitalManagerRef.current.release(reservationId);
+      capitalReservationId = '';
       const baseCoin = candidate.market.symbol.replace(/USDT$/, '');
       const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
       const buyFeeUsdt = fill.feeByCurrency.USDT || 0;
@@ -557,16 +594,14 @@ export const TradeScreen: React.FC<Props> = ({
         const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
         // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
         // The floor still covers fees/slippage; the cap prevents an unrealistic distant exit.
-        const dynamicProfitPct = Math.max(
-          AUTO_SELL_PROFIT_PCT,
-          Math.min(0.85, 0.28 + Math.abs(candidate.windowMomentumPct) * 0.30 + Math.max(0, candidate.shortMomentumPct) * 0.75),
-        );
+        const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
+        const dynamicProfitPct = exitPolicy.takeProfitPct;
         const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
         const makerNetTarget = position.qty > 0
           ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
           : grossTarget;
         const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
-        const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice);
+        const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice, 'happy-hour');
         const protectedCost = position.qty > 0 ? position.costUsdt * (exit.normalizedQty / position.qty) : position.costUsdt;
         trackedPosition = {
           ...position,
@@ -574,6 +609,8 @@ export const TradeScreen: React.FC<Props> = ({
           costUsdt: protectedCost,
           exitOrderId: exit.orderId,
           targetSellPrice: exit.normalizedPrice,
+          trailArmPct: exitPolicy.trailArmPct,
+          trailDropPct: exitPolicy.trailDropPct,
           sellReady: false,
         };
         exitStatus = `GTC SELL @ ${priceText(exit.normalizedPrice)} pozostawiony na Bybit`;
@@ -590,20 +627,26 @@ export const TradeScreen: React.FC<Props> = ({
       setError(message);
       setSmartStatus(`AUTO BUY nieudany: ${message}. Skaner działa dalej.`);
     } finally {
+      if (capitalReservationId) capitalManagerRef.current.release(capitalReservationId);
       setBusy(false);
     }
   };
 
   const executeAssistSell = async (position: TrackedPosition) => {
     if (sellBusyRef.current || position.fromPortfolio) return;
-    const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
-    if (!position.sellReady || position.currentPnlUsdt < minNetProfit) return;
+    if (!position.sellReady || !passesNetProfitGate(position.currentPnlUsdt, position.costUsdt, AUTO_SELL_MIN_NET_USDT, AUTO_SELL_MIN_NET_PCT)) return;
 
     sellBusyRef.current = true;
     setBusy(true);
     setError('');
     try {
-      const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty);
+      if (position.trailingExit && position.exitOrderId) {
+        // Cancel acknowledgement is required before a market fallback, preventing a duplicate SELL.
+        await cancelSpotOrder(credentials, position.symbol, position.exitOrderId);
+        position = { ...position, exitOrderId: undefined, targetSellPrice: undefined };
+        livePositionsRef.current = livePositionsRef.current.map((item) => item.id === position.id ? position : item);
+      }
+      const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty, 'happy-hour');
       const fill = await waitForSpotFill(credentials, ack.orderId);
       const baseCoin = position.symbol.replace(/USDT$/, '');
       const sellFeeUsdt = fill.feeByCurrency.USDT || 0;
@@ -634,64 +677,6 @@ export const TradeScreen: React.FC<Props> = ({
       sellBusyRef.current = false;
       setBusy(false);
     }
-  };
-
-  const runFreeUsdtGrowthStep = async (): Promise<void> => {
-    if (smartMode !== 'assist' || smartRunningRef.current || sellBusyRef.current) return;
-
-    const trade = Math.min(maxOrderUsdt, Math.max(SMART_MIN_TRADE_USDT, toNumber(amount) || SMART_MIN_TRADE_USDT));
-    const slots = Math.max(1, Math.min(8, Math.floor(toNumber(maxSlots)) || 1));
-    const owned = livePositionsRef.current.filter((item) => !item.fromPortfolio);
-    const refreshed: TrackedPosition[] = [];
-
-    for (const position of owned) {
-      try {
-        const updated = await updateTrackedPosition(position);
-        if (updated.closed) {
-          const pnl = updated.realizedPnlUsdt || 0;
-          sessionProfitRef.current += pnl;
-          setSessionProfit(sessionProfitRef.current);
-          if (pnl > 0) {
-            cycleCountRef.current += 1;
-            setCycleCount(cycleCountRef.current);
-          }
-        } else {
-          refreshed.push(updated);
-        }
-      } catch {
-        refreshed.push(position);
-      }
-    }
-
-    const portfolioOwned = livePositionsRef.current.filter((item) => item.fromPortfolio);
-    livePositionsRef.current = [...portfolioOwned, ...refreshed];
-    setLivePositions([...livePositionsRef.current]);
-
-    const sellCandidate = refreshed.find((position) =>
-      !position.exitOrderId && position.sellReady && position.currentPnlUsdt > 0
-    );
-    if (sellCandidate) {
-      await executeAssistSell(sellCandidate);
-      return;
-    }
-
-    const free = await refreshAvailableUsdt();
-    if (free + 1e-8 >= trade && refreshed.length < slots) {
-      const candidate = await scanBestCandidate();
-      if (candidate) {
-        // A core holding must not block USDT growth. Happy Hour positions are tracked
-        // independently from portfolio CORE positions, even for the same symbol.
-        const alreadyHappyOwned = refreshed.some((item) => item.symbol === candidate.market.symbol);
-        if (!alreadyHappyOwned) {
-          await buyCandidate(candidate, trade, slots);
-          return;
-        }
-      }
-    }
-
-    // Strategic accumulation is deliberately lower priority than free-USDT growth.
-    // It can use only the realized-profit fund and must preserve the configured USDT reserve.
-    await tryBuyStrategicDip();
   };
 
   const creditCoreFund = (realizedPnlUsdt: number) => {
@@ -799,7 +784,7 @@ export const TradeScreen: React.FC<Props> = ({
       setBusy(true);
       setSmartStatus(`SMART ACCUMULATION: ${position.symbol} potwierdził lokalną górkę. Sprzedaję część roboczą...`);
       try {
-        const ack = await placeSpotMarketSellBase(credentials, position.symbol, qty);
+        const ack = await placeSpotMarketSellBase(credentials, position.symbol, qty, 'smart');
         const fill = await waitForSpotFill(credentials, ack.orderId);
         const soldQty = fill.baseQty > 0 ? fill.baseQty : qty;
         const baseCoin = position.symbol.replace(/USDT$/, '');
@@ -989,7 +974,8 @@ export const TradeScreen: React.FC<Props> = ({
 
 
   const startAccumulationEngine = (restored = false) => {
-    if (accumulationRunning) return;
+    if (accumulationRunningRef.current) return;
+    accumulationRunningRef.current = true;
     accumulationStopRef.current = false;
     void setTradingRunRequested('smart', true);
     if (restored) setAccumulationStatus('SMART: przywracam pracę po wznowieniu aplikacji...');
@@ -1077,12 +1063,6 @@ export const TradeScreen: React.FC<Props> = ({
               await tryFinishAccumulation(activeCycle.symbol);
             }
 
-            // Free USDT is a separate growth pool. It may BUY/SELL short-term positions,
-            // but it is never replenished by liquidating CORE holdings.
-            if (!accumulationStopRef.current && !smartRunningRef.current) {
-              await runFreeUsdtGrowthStep();
-            }
-
             const freeUsdtNow = await refreshAvailableUsdt();
             setAccumulationStatus(`SMART TOTAL CAPITAL: CORE/HOLD ${smartOwned.length} • fundusz dokupienia ${coreAccumulationFundRef.current.toFixed(4)} USDT • wolne USDT ${freeUsdtNow.toFixed(2)}. CORE: tylko gromadzenie, bez automatycznej sprzedaży.`);
             await sleep(900);
@@ -1095,6 +1075,7 @@ export const TradeScreen: React.FC<Props> = ({
         setAccumulationStatus(`SMART: nie udało się wczytać portfela — ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
       } finally {
         await deactivateTradingEngine('smart').catch(() => undefined);
+        accumulationRunningRef.current = false;
         setAccumulationRunning(false);
         accumulationStopRef.current = false;
         setAccumulationStatus((current) => current.startsWith('SMART: nie udało') ? current : 'SMART zatrzymany. Happy Hour działa niezależnie.');
@@ -1110,11 +1091,12 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const startSmart = (restored = false) => {
+    if (smartRunningRef.current) return;
     const trade = toNumber(amount);
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
-    const slots = Math.max(1, Math.min(3, Math.floor(toNumber(maxSlots)) || 1));
+    const slots = Math.max(1, Math.min(2, Math.floor(toNumber(maxSlots)) || 1));
     const virtualCapital = toNumber(shadowCapital);
 
     if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
@@ -1249,7 +1231,7 @@ export const TradeScreen: React.FC<Props> = ({
             livePositionsRef.current = [...smartOwned, ...refreshed];
             setLivePositions([...livePositionsRef.current]);
 
-            const sellCandidate = refreshed.find((position) => !position.fromPortfolio && !position.exitOrderId && position.sellReady && position.currentPnlUsdt > 0);
+            const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
             if (sellCandidate) {
               await executeAssistSell(sellCandidate);
               await sleep(500);
@@ -1373,6 +1355,7 @@ export const TradeScreen: React.FC<Props> = ({
 
             <Text style={styles.feeInfo}>Spot MNT: Maker {SPOT_MAKER_FEE_PCT.toFixed(3)}% • Taker {SPOT_TAKER_FEE_PCT.toFixed(3)}% • Market BUY+SELL ≈ {MARKET_ROUND_TRIP_FEE_PCT.toFixed(3)}% + spread/slippage. Po fill bot używa rzeczywistego execFee z Bybit.</Text>
             {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
+            <Text style={styles.aiStatus}>{aiAdvisorStatus}</Text>
             {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
@@ -1477,6 +1460,7 @@ const styles = StyleSheet.create({
   sellLockInfo: { color: '#FF6B6B', fontSize: 11, fontWeight: '800', marginBottom: 8 },
   feeInfo: { color: '#A3E635', fontSize: 10, lineHeight: 15, marginTop: 10 },
   scanInfo: { color: '#F0B90B', fontSize: 11, lineHeight: 16, marginTop: 12 },
+  aiStatus: { color: '#00E5FF', fontSize: 11, lineHeight: 16, marginTop: 6 },
   candidate: { color: '#22C55E', fontSize: 11, lineHeight: 16, marginTop: 7 },
   status: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   smartButton: { backgroundColor: '#F0B90B', padding: 14, borderRadius: 10, alignItems: 'center' },
