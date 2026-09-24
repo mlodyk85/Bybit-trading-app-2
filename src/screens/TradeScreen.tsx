@@ -18,6 +18,7 @@ import { ApiCredentials, TradeAck } from '../api/types';
 import { COIN_BUILDER_SYMBOLS, isCoreAccumulationSymbol } from '../services/coinBuilder';
 import { loadSellLockedSymbols } from '../services/tradingPreferences';
 import { activateTradingEngine, deactivateTradingEngine } from '../services/tradingForegroundService';
+import { loadTradingRunState, setTradingRunRequested } from '../services/tradingRunState';
 import {
   cancelSpotOrder,
   fetchSpotExecutions,
@@ -388,8 +389,10 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const stopSmart = () => {
+    // Only this explicit user action is allowed to disable Happy Hour.
     stopRef.current = true;
-    setSmartStatus('STOP: kończę skanowanie. Otwarte pozycje SMART AUTO pozostają bez zmian.');
+    void setTradingRunRequested('happy-hour', false);
+    setSmartStatus('STOP RĘCZNY: kończę skanowanie. Otwarte pozycje SMART AUTO pozostają bez zmian.');
   };
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
@@ -985,9 +988,11 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
 
-  const startAccumulationEngine = () => {
+  const startAccumulationEngine = (restored = false) => {
     if (accumulationRunning) return;
     accumulationStopRef.current = false;
+    void setTradingRunRequested('smart', true);
+    if (restored) setAccumulationStatus('SMART: przywracam pracę po wznowieniu aplikacji...');
     void activateTradingEngine('smart').catch((e: unknown) => {
       // Foreground keep-alive is an enhancement; its failure must never cancel the trading engine.
       setAccumulationStatus(`SMART uruchomiony • usługa tła niedostępna: ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
@@ -1098,11 +1103,13 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const stopAccumulationEngine = () => {
+    // Only this explicit user action is allowed to disable SMART.
     accumulationStopRef.current = true;
-    setAccumulationStatus('SMART: zatrzymuję własny silnik...');
+    void setTradingRunRequested('smart', false);
+    setAccumulationStatus('SMART: zatrzymuję własny silnik ręcznie...');
   };
 
-  const startSmart = () => {
+  const startSmart = (restored = false) => {
     const trade = toNumber(amount);
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
@@ -1118,6 +1125,8 @@ export const TradeScreen: React.FC<Props> = ({
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
 
     stopRef.current = false;
+    void setTradingRunRequested('happy-hour', true);
+    if (restored) setSmartStatus('HAPPY HOUR: przywracam ciągłe skanowanie po wznowieniu aplikacji...');
     void activateTradingEngine('happy-hour').catch((e: unknown) => {
       // Never turn trading back off just because Android rejected the keep-alive service.
       setError(`Happy Hour działa na pierwszym planie; usługa tła niedostępna: ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
@@ -1274,6 +1283,20 @@ export const TradeScreen: React.FC<Props> = ({
       setSmartStatus('Happy Hour zatrzymany ręcznie.');
     })();
   };
+
+  useEffect(() => {
+    let mounted = true;
+    void loadTradingRunState().then((state) => {
+      if (!mounted) return;
+      // A stored RUN request survives screen/app recreation. We resume automatically;
+      // only the explicit STOP buttons clear these flags.
+      if (state.smart && !accumulationRunning) startAccumulationEngine(true);
+      if (state.happyHour && !smartRunningRef.current) startSmart(true);
+    }).catch(() => undefined);
+    return () => { mounted = false; };
+    // Restore once for this screen instance; engines manage their own continuous loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const positionsToRender = smartMode === 'shadow' ? shadowPositions : livePositions.filter((position) => !position.fromPortfolio);
   const smartPositionsToRender = livePositions.filter((position) => position.fromPortfolio);
