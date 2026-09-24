@@ -1387,7 +1387,7 @@ export const TradeScreen: React.FC<Props> = ({
 
             {smartRunning
               ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
-              : <TouchableOpacity style={styles.smartButton} onPress={startSmart}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : 'START DEMO'}</Text></TouchableOpacity>}
           </>}
         </View>
 
@@ -1412,7 +1412,7 @@ export const TradeScreen: React.FC<Props> = ({
           </View></View>)}
           {accumulationRunning
             ? <TouchableOpacity style={styles.stopButton} onPress={stopAccumulationEngine}><Text style={styles.buttonText}>STOP SMART</Text></TouchableOpacity>
-            : <TouchableOpacity style={styles.smartButton} onPress={startAccumulationEngine}><Text style={styles.smartButtonText}>START CAŁY KAPITAŁ</Text></TouchableOpacity>}
+            : <TouchableOpacity style={styles.smartButton} onPress={() => startAccumulationEngine(false)}><Text style={styles.smartButtonText}>START CAŁY KAPITAŁ</Text></TouchableOpacity>}
         </View>
 
         {lastAck && <View style={styles.card}><Text style={styles.cardTitle}>Ostatnie zlecenie</Text><Text style={styles.line}>{lastAck.side} {lastAck.symbol} • {lastAck.quoteAmountUsdt.toFixed(2)} USDT</Text><Text style={styles.line}>Order ID: {lastAck.orderId}</Text></View>}
