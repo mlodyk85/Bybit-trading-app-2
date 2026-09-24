@@ -17,6 +17,7 @@ import { AssetSmartAutoSeed } from '../components/AssetRow';
 import { ApiCredentials, TradeAck } from '../api/types';
 import { COIN_BUILDER_SYMBOLS, isCoreAccumulationSymbol } from '../services/coinBuilder';
 import { loadSellLockedSymbols } from '../services/tradingPreferences';
+import { activateTradingEngine, deactivateTradingEngine } from '../services/tradingForegroundService';
 import {
   cancelSpotOrder,
   fetchSpotExecutions,
@@ -987,6 +988,10 @@ export const TradeScreen: React.FC<Props> = ({
   const startAccumulationEngine = () => {
     if (accumulationRunning) return;
     accumulationStopRef.current = false;
+    void activateTradingEngine('smart').catch((e: unknown) => {
+      setAccumulationStatus(`SMART: nie udało się uruchomić usługi tła — ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
+      accumulationStopRef.current = true;
+    });
     setAccumulationRunning(true);
     setAccumulationStatus('SMART: wykrywam coiny dostępne w portfelu i ich ostatnią cenę zakupu...');
 
@@ -1084,6 +1089,7 @@ export const TradeScreen: React.FC<Props> = ({
       } catch (e: unknown) {
         setAccumulationStatus(`SMART: nie udało się wczytać portfela — ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
       } finally {
+        await deactivateTradingEngine('smart').catch(() => undefined);
         setAccumulationRunning(false);
         accumulationStopRef.current = false;
         setAccumulationStatus((current) => current.startsWith('SMART: nie udało') ? current : 'SMART zatrzymany. Happy Hour działa niezależnie.');
@@ -1112,6 +1118,10 @@ export const TradeScreen: React.FC<Props> = ({
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
 
     stopRef.current = false;
+    void activateTradingEngine('happy-hour').catch((e: unknown) => {
+      setError(`Nie udało się uruchomić usługi tła: ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
+      stopRef.current = true;
+    });
     scanCountRef.current = 0;
     cycleCountRef.current = 0;
     sessionProfitRef.current = 0;
@@ -1257,6 +1267,7 @@ export const TradeScreen: React.FC<Props> = ({
         }
       }
 
+      await deactivateTradingEngine('happy-hour').catch(() => undefined);
       smartRunningRef.current = false;
       setSmartRunning(false);
       stopRef.current = false;
