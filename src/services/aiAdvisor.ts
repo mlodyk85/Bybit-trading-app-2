@@ -8,8 +8,10 @@ const MAX_SHADOW_ROWS = 250;
 
 export interface AiAdvisorConfig {
   enabled: boolean;
+  mode: 'shadow' | 'auto';
   endpointUrl: string;
   timeoutMs: number;
+  minConfidence: number;
 }
 
 export type AiDecision = 'BUY' | 'WAIT' | 'REDUCE_RISK' | 'VETO';
@@ -52,7 +54,7 @@ export interface AiShadowRecord {
   evaluatedAt?: number;
 }
 
-const DEFAULT_CONFIG: AiAdvisorConfig = { enabled: false, endpointUrl: '', timeoutMs: 4500 };
+const DEFAULT_CONFIG: AiAdvisorConfig = { enabled: false, mode: 'shadow', endpointUrl: '', timeoutMs: 4500, minConfidence: 0.72 };
 
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const stringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
@@ -71,9 +73,11 @@ export function validateAiAdvice(value: unknown): AiAdvice | null {
   return row as AiAdvice;
 }
 
-export function aiAdviceCanAuthorizeLiveTrade(snapshot: AiMarketSnapshot, advice: AiAdvice): boolean {
-  // Build 180 is deliberately shadow-only. This function documents and tests the hard boundary.
-  return false && !isCoreSymbol(snapshot.symbol) && advice.decision === 'BUY';
+export function aiAdviceCanAuthorizeLiveTrade(snapshot: AiMarketSnapshot, advice: AiAdvice, minConfidence = 0.72): boolean {
+  return !isCoreSymbol(snapshot.symbol)
+    && advice.decision === 'BUY'
+    && advice.confidence >= Math.max(0.5, Math.min(0.95, minConfidence))
+    && advice.riskMultiplier > 0;
 }
 
 export async function loadAiAdvisorConfig(): Promise<AiAdvisorConfig> {
@@ -83,8 +87,10 @@ export async function loadAiAdvisorConfig(): Promise<AiAdvisorConfig> {
     const parsed = JSON.parse(raw) as Partial<AiAdvisorConfig>;
     return {
       enabled: Boolean(parsed.enabled),
+      mode: parsed.mode === 'auto' ? 'auto' : 'shadow',
       endpointUrl: typeof parsed.endpointUrl === 'string' ? parsed.endpointUrl.trim() : '',
       timeoutMs: Math.max(1500, Math.min(10000, Number(parsed.timeoutMs) || DEFAULT_CONFIG.timeoutMs)),
+      minConfidence: Math.max(0.5, Math.min(0.95, Number(parsed.minConfidence) || DEFAULT_CONFIG.minConfidence)),
     };
   } catch { return DEFAULT_CONFIG; }
 }
@@ -94,8 +100,10 @@ export async function saveAiAdvisorConfig(config: AiAdvisorConfig): Promise<void
   if (config.enabled && !/^https:\/\//i.test(endpointUrl)) throw new Error('AI Advisor wymaga bezpiecznego adresu HTTPS.');
   await SecureStore.setItemAsync(CONFIG_KEY, JSON.stringify({
     enabled: config.enabled,
+    mode: config.mode === 'auto' ? 'auto' : 'shadow',
     endpointUrl,
     timeoutMs: Math.max(1500, Math.min(10000, config.timeoutMs)),
+    minConfidence: Math.max(0.5, Math.min(0.95, config.minConfidence)),
   }));
 }
 
@@ -107,7 +115,7 @@ export async function requestAiAdvice(snapshot: AiMarketSnapshot, config: AiAdvi
     const response = await fetch(config.endpointUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ schemaVersion: 1, mode: 'shadow', snapshot }),
+      body: JSON.stringify({ schemaVersion: 1, mode: config.mode, snapshot }),
       signal: controller.signal,
     });
     if (!response.ok) return null;
