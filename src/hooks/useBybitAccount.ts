@@ -51,7 +51,7 @@ export function useBybitAccount(): UseBybitAccountReturn {
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState<boolean>(true);
   const [autoRefreshInterval, setAutoRefreshInterval] = useState<AutoRefreshInterval>(15);
 
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Load credentials on startup
   useEffect(() => {
