@@ -50,16 +50,17 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiEndpoint, setAiEndpoint] = useState('');
+  const [aiAutoEnabled, setAiAutoEnabled] = useState(false);
   const [aiSaving, setAiSaving] = useState(false);
 
   useEffect(() => setOrderLimitText(String(maxOrderUsdt)), [maxOrderUsdt]);
-  useEffect(() => { let mounted = true; void loadAiAdvisorConfig().then((config) => { if (mounted) { setAiEnabled(config.enabled); setAiEndpoint(config.endpointUrl); } }); return () => { mounted = false; }; }, []);
+  useEffect(() => { let mounted = true; void loadAiAdvisorConfig().then((config) => { if (mounted) { setAiEnabled(config.enabled); setAiAutoEnabled(config.mode === 'auto'); setAiEndpoint(config.endpointUrl); } }); return () => { mounted = false; }; }, []);
 
   const saveAiConfig = async () => {
     setAiSaving(true);
     try {
-      await saveAiAdvisorConfig({ enabled: aiEnabled, endpointUrl: aiEndpoint, timeoutMs: 4500 });
-      Alert.alert('AI Advisor', aiEnabled ? 'Włączono bezpieczny tryb SHADOW. AI nie wykonuje zleceń.' : 'AI Advisor jest wyłączony.');
+      await saveAiAdvisorConfig({ enabled: aiEnabled, mode: aiAutoEnabled ? 'auto' : 'shadow', endpointUrl: aiEndpoint, timeoutMs: 4500, minConfidence: 0.72 });
+      Alert.alert('AI Advisor', aiEnabled ? (aiAutoEnabled ? 'AUTO AI aktywne. AI może autoryzować BUY po przejściu twardych limitów Risk Engine.' : 'Włączono tryb SHADOW — tylko analiza.') : 'AI Advisor jest wyłączony.');
     } catch (error: unknown) {
       Alert.alert('Nie zapisano AI Advisor', error instanceof Error ? error.message : 'Nieprawidłowa konfiguracja.');
     } finally { setAiSaving(false); }
@@ -206,11 +207,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         <View style={styles.aiHeader}>
           <View style={styles.aiHeaderText}>
             <Text style={styles.sectionTitle}>AI Strategy Advisor</Text>
-            <Text style={styles.aiBadge}>SHADOW ONLY</Text>
+            <Text style={styles.aiBadge}>{aiAutoEnabled ? 'AUTO AI' : 'SHADOW'}</Text>
           </View>
           <Switch value={aiEnabled} onValueChange={setAiEnabled} />
         </View>
-        <Text style={styles.updateHint}>AI porównuje swoją ocenę z decyzją lokalnego silnika, ale build 180 nie pozwala AI składać zleceń, sprzedawać CORE ani zwiększać ryzyka.</Text>
+        <Text style={styles.updateHint}>SHADOW tylko ocenia. AUTO AI może autoryzować realny BUY po analizie, ale nadal nie może sprzedać CORE, ominąć SELL LOCK ani przekroczyć limitu pojedynczej transakcji.</Text>
+        <View style={styles.aiHeader}><Text style={styles.inputLabel}>AUTO AI — realne transakcje</Text><Switch value={aiAutoEnabled} onValueChange={setAiAutoEnabled} disabled={!aiEnabled} /></View>
         <Text style={styles.inputLabel}>HTTPS endpoint bezpiecznego backendu</Text>
         <TextInput style={styles.input} value={aiEndpoint} onChangeText={setAiEndpoint} autoCapitalize="none" autoCorrect={false} placeholder="https://twoj-serwer.example/ai/advice" placeholderTextColor="#666666" />
         <Text style={styles.aiWarning}>Nie wpisuj tutaj klucza OpenAI. Klucz musi być zapisany wyłącznie jako sekret środowiskowy backendu.</Text>
