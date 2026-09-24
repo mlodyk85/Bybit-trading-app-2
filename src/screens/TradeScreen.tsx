@@ -989,8 +989,8 @@ export const TradeScreen: React.FC<Props> = ({
     if (accumulationRunning) return;
     accumulationStopRef.current = false;
     void activateTradingEngine('smart').catch((e: unknown) => {
-      setAccumulationStatus(`SMART: nie udało się uruchomić usługi tła — ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
-      accumulationStopRef.current = true;
+      // Foreground keep-alive is an enhancement; its failure must never cancel the trading engine.
+      setAccumulationStatus(`SMART uruchomiony • usługa tła niedostępna: ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
     });
     setAccumulationRunning(true);
     setAccumulationStatus('SMART: wykrywam coiny dostępne w portfelu i ich ostatnią cenę zakupu...');
@@ -1119,8 +1119,8 @@ export const TradeScreen: React.FC<Props> = ({
 
     stopRef.current = false;
     void activateTradingEngine('happy-hour').catch((e: unknown) => {
-      setError(`Nie udało się uruchomić usługi tła: ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
-      stopRef.current = true;
+      // Never turn trading back off just because Android rejected the keep-alive service.
+      setError(`Happy Hour działa na pierwszym planie; usługa tła niedostępna: ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
     });
     scanCountRef.current = 0;
     cycleCountRef.current = 0;
