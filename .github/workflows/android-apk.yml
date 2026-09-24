@@ -39,7 +39,9 @@ jobs:
         run: npm ci --include=dev
 
       - name: Install native runtime modules
-        run: npx expo install expo-file-system expo-intent-launcher expo-background-fetch expo-task-manager expo-notifications
+        run: |
+          npx expo install expo-file-system expo-intent-launcher expo-background-fetch expo-task-manager expo-notifications
+          npm install --no-save react-native-background-actions@4.1.0
 
       - name: Lint check
         run: npm run lint
