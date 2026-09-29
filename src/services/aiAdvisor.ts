@@ -97,7 +97,12 @@ export async function loadAiAdvisorConfig(): Promise<AiAdvisorConfig> {
 
 export async function saveAiAdvisorConfig(config: AiAdvisorConfig): Promise<void> {
   const endpointUrl = config.endpointUrl.trim();
-  if (config.enabled && !/^https:\/\//i.test(endpointUrl)) throw new Error('AI Advisor wymaga bezpiecznego adresu HTTPS.');
+  if (config.enabled && config.mode === 'auto' && !/^https:\/\//i.test(endpointUrl)) {
+    throw new Error('AUTO AI wymaga bezpiecznego adresu HTTPS. SHADOW może działać lokalnie bez serwera.');
+  }
+  if (endpointUrl && !/^https:\/\//i.test(endpointUrl)) {
+    throw new Error('Jeśli podajesz endpoint AI, musi zaczynać się od https://');
+  }
   await SecureStore.setItemAsync(CONFIG_KEY, JSON.stringify({
     enabled: config.enabled,
     mode: config.mode === 'auto' ? 'auto' : 'shadow',
@@ -107,8 +112,58 @@ export async function saveAiAdvisorConfig(config: AiAdvisorConfig): Promise<void
   }));
 }
 
+
+function localShadowAdvice(snapshot: AiMarketSnapshot): AiAdvice {
+  // Local SHADOW uses only market data already present on the phone.
+  // It never authorizes a live trade; it exists for offline scoring, logging and comparison.
+  const cost = Math.max(0, snapshot.estimatedRoundTripCostPct);
+  const momentum = snapshot.windowMomentumPct;
+  const shortMomentum = snapshot.shortMomentumPct;
+  const spreadPenalty = Math.min(0.25, Math.max(0, snapshot.spreadPct) * 2);
+  const liquidityBoost = snapshot.turnover24h >= 10_000_000 ? 0.08 : snapshot.turnover24h >= 1_000_000 ? 0.04 : 0;
+  const rebound = momentum < 0 && shortMomentum > 0;
+  const trend = momentum > cost && shortMomentum > 0;
+  const riskHigh = snapshot.volatilityPct > 4 || snapshot.spreadPct > 0.35;
+
+  let decision: AiDecision = 'WAIT';
+  if (riskHigh) decision = 'REDUCE_RISK';
+  else if (rebound || trend) decision = 'BUY';
+
+  const edge = Math.max(0, shortMomentum - cost);
+  const confidence = Math.max(0.5, Math.min(0.92,
+    0.58
+    + (rebound ? 0.10 : 0)
+    + (trend ? 0.08 : 0)
+    + liquidityBoost
+    + Math.min(0.08, edge / 4)
+    - spreadPenalty
+  ));
+
+  const expectedMovePct = Math.max(0, shortMomentum > 0 ? shortMomentum : Math.abs(momentum) * 0.35);
+  const riskMultiplier = riskHigh ? 0.35 : confidence >= 0.78 ? 0.85 : confidence >= 0.68 ? 0.65 : 0.45;
+
+  return {
+    decision,
+    confidence,
+    expectedMovePct,
+    riskMultiplier,
+    tpMultiplier: confidence >= 0.8 ? 1.2 : 1,
+    trailingMultiplier: riskHigh ? 0.8 : 1,
+    validForSeconds: 20,
+    reasons: [
+      rebound ? 'Lokalne odbicie po spadku' : trend ? 'Dodatni krótkoterminowy momentum' : 'Brak przewagi wystarczającej do wejścia',
+      `Koszt rundy ~${cost.toFixed(3)}%`,
+      `Spread ${snapshot.spreadPct.toFixed(3)}%`,
+    ],
+    warnings: riskHigh ? ['Podwyższona zmienność lub spread'] : [],
+  };
+}
+
 export async function requestAiAdvice(snapshot: AiMarketSnapshot, config: AiAdvisorConfig): Promise<AiAdvice | null> {
-  if (!config.enabled || !config.endpointUrl || isCoreSymbol(snapshot.symbol)) return null;
+  if (!config.enabled || isCoreSymbol(snapshot.symbol)) return null;
+  if (!config.endpointUrl) {
+    return config.mode === 'shadow' ? localShadowAdvice(snapshot) : null;
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
