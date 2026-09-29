@@ -52,7 +52,7 @@ interface Props {
   onHoldingConsumed?: () => void;
 }
 
-type SmartMode = 'shadow' | 'assist';
+type SmartMode = 'shadow' | 'assist' | 'aggressive';
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -104,6 +104,12 @@ const SCAN_INTERVAL_MS = 1250;
 const AUTO_SELL_PROFIT_PCT = 0.35;
 const AUTO_SELL_MIN_NET_USDT = 0.01;
 const AUTO_SELL_MIN_NET_PCT = 0.08;
+// AGGRESSIVE BASKET stays Spot-only but rotates capital much faster:
+// no resting GTC exit after BUY, more parallel slots and a lower positive-net exit gate.
+const AGGRESSIVE_AUTO_SELL_PROFIT_PCT = 0.18;
+const AGGRESSIVE_MAX_SLOTS = 6;
+const AGGRESSIVE_SCAN_SAMPLES = 5;
+const AGGRESSIVE_SCAN_INTERVAL_MS = 650;
 const SPOT_MAKER_FEE_PCT = 0.075;
 const SPOT_TAKER_FEE_PCT = 0.075;
 const MARKET_ROUND_TRIP_FEE_PCT = SPOT_TAKER_FEE_PCT * 2;
@@ -414,11 +420,13 @@ export const TradeScreen: React.FC<Props> = ({
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
     const scanNo = scanCountRef.current + 1;
-    setSmartStatus(`Skan ${scanNo}: zbieram ${SCAN_SAMPLES} próbek rynku...`);
+    const scanSamples = smartMode === 'aggressive' ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
+    const scanIntervalMs = smartMode === 'aggressive' ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
+    setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${smartMode === 'aggressive' ? ' • AGGRESSIVE BASKET' : ''}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
 
-    for (let sample = 0; sample < SCAN_SAMPLES; sample += 1) {
+    for (let sample = 0; sample < scanSamples; sample += 1) {
       if (stopRef.current) return null;
       latest = await fetchSpotUsdtMarketCandidates(240);
       for (const item of latest) {
@@ -426,8 +434,8 @@ export const TradeScreen: React.FC<Props> = ({
         history.push(item);
         tracks.set(item.symbol, history);
       }
-      setScanInfo(`Skan ${scanNo}: próbka ${sample + 1}/${SCAN_SAMPLES}`);
-      if (sample < SCAN_SAMPLES - 1) await sleep(SCAN_INTERVAL_MS);
+      setScanInfo(`Skan ${scanNo}: próbka ${sample + 1}/${scanSamples}`);
+      if (sample < scanSamples - 1) await sleep(scanIntervalMs);
     }
 
     scanCountRef.current = scanNo;
@@ -538,12 +546,13 @@ export const TradeScreen: React.FC<Props> = ({
     const trailingExit = peakMovePct >= (position.trailArmPct || Number.POSITIVE_INFINITY)
       && peakMovePct - movePct >= (position.trailDropPct || Number.POSITIVE_INFINITY)
       && currentPnlUsdt >= minNetProfit;
-    const sellReady = ((!position.exitOrderId && movePct >= AUTO_SELL_PROFIT_PCT) || trailingExit) && currentPnlUsdt >= minNetProfit;
+    const exitMovePct = smartMode === 'aggressive' ? AGGRESSIVE_AUTO_SELL_PROFIT_PCT : AUTO_SELL_PROFIT_PCT;
+    const sellReady = ((!position.exitOrderId && movePct >= exitMovePct) || trailingExit) && currentPnlUsdt >= minNetProfit;
     return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady, trailingExit };
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
-    if (!candidate || stopRef.current || smartMode !== 'assist') return;
+    if (!candidate || stopRef.current || (smartMode !== 'assist' && smartMode !== 'aggressive')) return;
     // Hard safety wall: Happy Hour / USDT-growth must never trade strategic CORE.
     // CORE is purchased only by tryBuyStrategicDip() from realized-profit allocation.
     if (STRATEGIC_CORE_SYMBOLS.has(candidate.market.symbol)) {
@@ -598,33 +607,38 @@ export const TradeScreen: React.FC<Props> = ({
       };
 
       let trackedPosition = position;
-      let exitStatus = 'awaryjny monitoring ceny';
-      try {
-        const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
-        // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
-        // The floor still covers fees/slippage; the cap prevents an unrealistic distant exit.
-        const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
-        const dynamicProfitPct = exitPolicy.takeProfitPct;
-        const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
-        const makerNetTarget = position.qty > 0
-          ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
-          : grossTarget;
-        const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
-        const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice, 'happy-hour');
-        const protectedCost = position.qty > 0 ? position.costUsdt * (exit.normalizedQty / position.qty) : position.costUsdt;
-        trackedPosition = {
-          ...position,
-          qty: exit.normalizedQty,
-          costUsdt: protectedCost,
-          exitOrderId: exit.orderId,
-          targetSellPrice: exit.normalizedPrice,
-          trailArmPct: exitPolicy.trailArmPct,
-          trailDropPct: exitPolicy.trailDropPct,
-          sellReady: false,
-        };
-        exitStatus = `GTC SELL @ ${priceText(exit.normalizedPrice)} pozostawiony na Bybit`;
-      } catch (exitError: unknown) {
-        exitStatus = `nie udało się wystawić LIMIT SELL (${exitError instanceof Error ? exitError.message : 'błąd'}); bot monitoruje i użyje bezpiecznego wyjścia`;
+      let exitStatus = smartMode === 'aggressive'
+        ? 'AGGRESSIVE: bez wiszącego GTC SELL — aktywny monitoring i MARKET SELL po dodatnim wyniku netto'
+        : 'awaryjny monitoring ceny';
+
+      if (smartMode !== 'aggressive') {
+        try {
+          const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+          // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
+          // The floor still covers fees/slippage; the cap prevents an unrealistic distant exit.
+          const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
+          const dynamicProfitPct = exitPolicy.takeProfitPct;
+          const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
+          const makerNetTarget = position.qty > 0
+            ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
+            : grossTarget;
+          const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
+          const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice, 'happy-hour');
+          const protectedCost = position.qty > 0 ? position.costUsdt * (exit.normalizedQty / position.qty) : position.costUsdt;
+          trackedPosition = {
+            ...position,
+            qty: exit.normalizedQty,
+            costUsdt: protectedCost,
+            exitOrderId: exit.orderId,
+            targetSellPrice: exit.normalizedPrice,
+            trailArmPct: exitPolicy.trailArmPct,
+            trailDropPct: exitPolicy.trailDropPct,
+            sellReady: false,
+          };
+          exitStatus = `GTC SELL @ ${priceText(exit.normalizedPrice)} pozostawiony na Bybit`;
+        } catch (exitError: unknown) {
+          exitStatus = `nie udało się wystawić LIMIT SELL (${exitError instanceof Error ? exitError.message : 'błąd'}); bot monitoruje i użyje bezpiecznego wyjścia`;
+        }
       }
 
       livePositionsRef.current = [...livePositionsRef.current, trackedPosition];
@@ -1105,7 +1119,8 @@ export const TradeScreen: React.FC<Props> = ({
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
-    const slots = Math.max(1, Math.min(2, Math.floor(toNumber(maxSlots)) || 1));
+    const requestedSlots = Math.floor(toNumber(maxSlots)) || 1;
+    const slots = Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
 
     if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
@@ -1138,7 +1153,9 @@ export const TradeScreen: React.FC<Props> = ({
     setScanCount(0);
     setSessionProfit(0);
     setActiveScore(null);
-    setScanInfo(`Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
+    setScanInfo(smartMode === 'aggressive'
+      ? `AGGRESSIVE BASKET • do ${slots} równoległych pozycji • szybki skan • bez GTC SELL • MARKET SELL dopiero po dodatnim wyniku netto`
+      : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
 
     if (smartMode === 'shadow') {
       shadowUsdtRef.current = virtualCapital;
@@ -1340,8 +1357,10 @@ export const TradeScreen: React.FC<Props> = ({
 
             <View style={styles.modeRow}>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
+            {smartMode === 'aggressive' && <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: Spot/USDT, do 6 równoległych pozycji, szybszy skan i aktywne wyjście po dodatnim PnL netto. Ten tryb nie wystawia nowych długoterminowych GTC SELL, więc kapitał nie jest celowo blokowany w oczekujących zleceniach.</Text>}
 
             <View style={styles.grid}>
               <View style={styles.field}><Text style={styles.smallLabel}>Cel zysku (0 = bez limitu)</Text><TextInput value={targetProfit} onChangeText={setTargetProfit} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></View>
@@ -1349,7 +1368,7 @@ export const TradeScreen: React.FC<Props> = ({
             </View>
             <View style={styles.grid}>
               <View style={styles.field}><Text style={styles.smallLabel}>Min. cykli</Text><TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
-              <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty 1–3</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
+              <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty {smartMode === 'aggressive' ? '1–6' : '1–3'}</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
             </View>
             {smartMode === 'shadow' ? (
               <><Text style={styles.smallLabel}>Kapitał DEMO (min. 10 USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
@@ -1379,7 +1398,7 @@ export const TradeScreen: React.FC<Props> = ({
 
             {smartRunning
               ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
           </>}
         </View>
 
@@ -1452,6 +1471,7 @@ const styles = StyleSheet.create({
   smartTitle: { color: '#F0B90B', fontSize: 18, fontWeight: '900' },
   smartSub: { color: '#8E8E93', fontSize: 10, marginTop: 3, paddingRight: 8 },
   smartNotice: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
+  aggressiveNotice: { color: '#FBBF24', fontSize: 11, lineHeight: 16, marginBottom: 10, backgroundColor: '#2A220E', borderWidth: 1, borderColor: '#92400E', borderRadius: 8, padding: 9 },
   modeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
   modeButton: { flex: 1, backgroundColor: '#242424', borderWidth: 1, borderColor: '#3F3F46', padding: 10, borderRadius: 9, alignItems: 'center' },
   modeSelected: { borderColor: '#F0B90B', backgroundColor: '#302A12' },
