@@ -55,18 +55,61 @@ export async function checkLatestUpdate(currentVersion: string): Promise<Availab
   return { tag: release.tag_name, downloadUrl: asset.browser_download_url };
 }
 
-export async function downloadAndInstallUpdate(url: string, tag?: string): Promise<void> {
+export async function downloadAndInstallUpdate(
+  url: string,
+  tag?: string,
+  onProgress?: (percent: number, receivedBytes: number, totalBytes: number) => void,
+): Promise<void> {
   if (Platform.OS !== 'android') throw new Error('Aktualizacja APK jest dostępna tylko na Androidzie.');
   const safeTag = (tag || 'latest').replace(/[^a-zA-Z0-9._-]/g, '_');
   const target = `${FileSystem.cacheDirectory}bybit-trading-app-${safeTag}.apk`;
-  const result = await FileSystem.downloadAsync(url, target, { headers: { Accept: 'application/octet-stream' } });
-  if (result.status < 200 || result.status >= 300) throw new Error(`Pobieranie APK: HTTP ${result.status}`);
-  const contentUri = await FileSystem.getContentUriAsync(result.uri);
-  await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
-    data: contentUri,
-    flags: 1,
-    type: 'application/vnd.android.package-archive',
-  });
+
+  // A partially downloaded APK from a previous failed attempt must never be reused.
+  await FileSystem.deleteAsync(target, { idempotent: true }).catch(() => undefined);
+
+  let lastProgressAt = Date.now();
+  const download = FileSystem.createDownloadResumable(
+    url,
+    target,
+    { headers: { Accept: 'application/octet-stream' } },
+    (progress) => {
+      lastProgressAt = Date.now();
+      const total = progress.totalBytesExpectedToWrite || 0;
+      const received = progress.totalBytesWritten || 0;
+      const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((received / total) * 100))) : 0;
+      onProgress?.(percent, received, total);
+    },
+  );
+
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastProgressAt > 45000) {
+      void download.pauseAsync().catch(() => undefined);
+    }
+  }, 5000);
+
+  try {
+    const result = await Promise.race([
+      download.downloadAsync(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Pobieranie zatrzymało się. Sprawdź internet i spróbuj ponownie.')), 180000)),
+    ]);
+    if (!result) throw new Error('Pobieranie APK zostało przerwane.');
+    if (result.status < 200 || result.status >= 300) throw new Error(`Pobieranie APK: HTTP ${result.status}`);
+
+    const info = await FileSystem.getInfoAsync(result.uri);
+    if (!info.exists || !('size' in info) || typeof info.size !== 'number' || info.size < 10_000_000) {
+      throw new Error('Pobrany APK jest niepełny. Spróbuj ponownie.');
+    }
+
+    onProgress?.(100, 'size' in info && typeof info.size === 'number' ? info.size : 0, 'size' in info && typeof info.size === 'number' ? info.size : 0);
+    const contentUri = await FileSystem.getContentUriAsync(result.uri);
+    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+      data: contentUri,
+      flags: 1,
+      type: 'application/vnd.android.package-archive',
+    });
+  } finally {
+    clearInterval(watchdog);
+  }
 }
 
 export const AppUpdater: React.FC<Props> = ({ currentVersion }) => {
@@ -79,8 +122,12 @@ export const AppUpdater: React.FC<Props> = ({ currentVersion }) => {
     setDownloading(true);
     setProgressText(`Pobieranie ${tag}...`);
     try {
-      await downloadAndInstallUpdate(url, tag);
-      setProgressText('Otwieranie instalatora...');
+      await downloadAndInstallUpdate(url, tag, (percent, received, total) => {
+        const mb = (received / 1024 / 1024).toFixed(1);
+        const totalMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
+        setProgressText(`Pobieranie ${tag}: ${percent}% • ${mb}/${totalMb} MB`);
+      });
+      setProgressText('100% • otwieranie instalatora...');
     } catch (error: unknown) {
       Alert.alert('Aktualizacja nieudana', error instanceof Error ? error.message : 'Nie udało się pobrać lub otworzyć aktualizacji.');
     } finally {
@@ -116,7 +163,7 @@ export const AppUpdater: React.FC<Props> = ({ currentVersion }) => {
       <View style={styles.card}>
         <ActivityIndicator color="#F0B90B" />
         <Text style={styles.text}>{progressText}</Text>
-        <TouchableOpacity disabled style={styles.button}><Text style={styles.buttonText}>Aktualizacja w toku</Text></TouchableOpacity>
+        <Text style={styles.buttonText}>Nie zamykaj aplikacji podczas pobierania</Text>
       </View>
     </View>
   );
