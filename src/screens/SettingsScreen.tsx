@@ -211,11 +211,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           </View>
           <Switch value={aiEnabled} onValueChange={setAiEnabled} />
         </View>
-        <Text style={styles.updateHint}>SHADOW tylko ocenia. AUTO AI może autoryzować realny BUY po analizie, ale nadal nie może sprzedać CORE, ominąć SELL LOCK ani przekroczyć limitu pojedynczej transakcji.</Text>
+        <Text style={styles.updateHint}>SHADOW może działać lokalnie bez internetu i bez adresu HTTPS — analizuje dane rynkowe dostępne w aplikacji i zapisuje historię w pamięci telefonu. AUTO AI może autoryzować realny BUY po analizie, dlatego nadal wymaga bezpiecznego backendu HTTPS.</Text>
         <View style={styles.aiHeader}><Text style={styles.inputLabel}>AUTO AI — realne transakcje</Text><Switch value={aiAutoEnabled} onValueChange={setAiAutoEnabled} disabled={!aiEnabled} /></View>
-        <Text style={styles.inputLabel}>HTTPS endpoint bezpiecznego backendu</Text>
-        <TextInput style={styles.input} value={aiEndpoint} onChangeText={setAiEndpoint} autoCapitalize="none" autoCorrect={false} placeholder="https://twoj-serwer.example/ai/advice" placeholderTextColor="#666666" />
-        <Text style={styles.aiWarning}>Nie wpisuj tutaj klucza OpenAI. Klucz musi być zapisany wyłącznie jako sekret środowiskowy backendu.</Text>
+        <Text style={styles.inputLabel}>Endpoint AI — wymagany tylko dla AUTO AI</Text>
+        <TextInput style={styles.input} value={aiEndpoint} onChangeText={setAiEndpoint} autoCapitalize="none" autoCorrect={false} placeholder="Opcjonalnie dla SHADOW • https://twoj-serwer.example/ai/advice" placeholderTextColor="#666666" />
+        <Text style={styles.aiWarning}>{aiAutoEnabled ? 'AUTO AI wymaga HTTPS. Nie wpisuj tutaj klucza OpenAI — klucz powinien być tylko po stronie backendu.' : 'SHADOW bez endpointu działa lokalnie i zapisuje wyniki w pamięci telefonu.'}</Text>
         <TouchableOpacity style={[styles.limitButton, aiSaving && styles.disabledButton]} onPress={saveAiConfig} disabled={aiSaving}>
           {aiSaving ? <ActivityIndicator color="#000000" /> : <Text style={styles.limitButtonText}>Zapisz konfigurację AI</Text>}
         </TouchableOpacity>
