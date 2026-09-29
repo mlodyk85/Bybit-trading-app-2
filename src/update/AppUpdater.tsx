@@ -1,7 +1,7 @@
 import * as FileSystem from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Platform, StyleSheet, Text, View } from 'react-native';
 
 const RELEASE_API = 'https://api.github.com/repos/mlodyk85/Bybit-trading-app-2/releases/latest';
 const APK_NAME = 'bybit-trading-app-release.apk';
