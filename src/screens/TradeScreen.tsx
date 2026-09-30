@@ -120,6 +120,10 @@ const SLIPPAGE_SAFETY_PCT = 0.04;
 const EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const SMART_MIN_TRADE_USDT = 5;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.15;
+const ACCUMULATION_MIN_PROFIT_PCT = 0.75;
+const ACCUMULATION_PEAK_PULLBACK_PCT = 0.18;
+const ACCUMULATION_DEFAULT_SHARE = 0.05;
+const ACCUMULATION_REBUY_DROP_PCT = 0.35;
 const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const CORE_PROFIT_ALLOCATION_PCT = 0.50;
 const CORE_USDT_RESERVE_PCT = 0.40;
@@ -781,48 +785,59 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const tryStartAccumulation = async (): Promise<boolean> => {
-    // Strategic CORE is accumulation-only in build 160. Existing holdings are never
-    // sold to manufacture USDT; realized USDT profit is used for confirmed dip buys.
-    return false;
-    /*
     if (sellBusyRef.current) return false;
+
+    const locked = new Set(sellLockedSymbolsRef.current.map((item) => item.toUpperCase()));
     const candidates = livePositionsRef.current
-      .filter((position) => position.fromPortfolio && !isCoreAccumulationSymbol(position.symbol))
-      .sort((a, b) => (b.currentMovePct - b.peakMovePct) - (a.currentMovePct - a.peakMovePct));
+      .filter((position) =>
+        position.fromPortfolio
+        && isCoreAccumulationSymbol(position.symbol)
+        && !locked.has(position.symbol.toUpperCase())
+        && !accumulationRef.current.has(position.symbol)
+        && position.qty > 0
+      )
+      .sort((a, b) => {
+        const aPullback = a.peakMovePct - a.currentMovePct;
+        const bPullback = b.peakMovePct - b.currentMovePct;
+        return bPullback - aPullback;
+      });
 
     for (const position of candidates) {
       const pullbackPct = position.peakMovePct - position.currentMovePct;
-      const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
-      const trailingHarvest = position.currentMovePct >= ACCUMULATION_MIN_PROFIT_PCT
+      const configuredShare = Math.min(0.10, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
+      const slicePnl = position.currentPnlUsdt * configuredShare;
+      const sliceCost = position.costUsdt * configuredShare;
+      const minSliceNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, sliceCost * (AUTO_SELL_MIN_NET_PCT / 100));
+
+      const trailingHarvest =
+        position.currentMovePct >= ACCUMULATION_MIN_PROFIT_PCT
         && pullbackPct >= ACCUMULATION_PEAK_PULLBACK_PCT
-        && position.currentPnlUsdt >= minNetProfit;
+        && slicePnl >= minSliceNetProfit;
       if (!trailingHarvest) continue;
 
       const snapshot = await fetchSpotMarketSnapshot(position.symbol);
       const sellPrice = snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice;
       if (sellPrice <= 0) continue;
 
-      const configuredShare = Math.min(0.10, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
-      const totalQuote = position.qty * sellPrice;
       const exchangeMinQuote = await fetchSpotMinOrderAmt(position.symbol);
-      if (exchangeMinQuote > 0 && totalQuote + 1e-8 < exchangeMinQuote) continue;
-
-      // Do not let a small configured share block a profitable portfolio coin.
-      // Increase only the working slice enough to satisfy the real Bybit minimum,
-      // while never selling more than the tracked balance.
-      const minExecutableQty = exchangeMinQuote > 0 ? (exchangeMinQuote * 1.01) / sellPrice : 0;
+      const minExecutableQty = exchangeMinQuote > 0 ? (exchangeMinQuote * 1.02) / sellPrice : 0;
+      const configuredQty = position.qty * configuredShare;
       const hardMaxWorkingQty = position.qty * 0.10;
-      if (minExecutableQty > hardMaxWorkingQty + 1e-12) {
-        setSmartStatus(`SMART COIN BUILDER: ${position.symbol} pomijam SELL — minimum Bybit wymagałoby ruszenia >10% pozycji.`);
+      const maxByOrderLimitQty = maxOrderUsdt > 0 ? maxOrderUsdt / sellPrice : hardMaxWorkingQty;
+      const allowedMaxQty = Math.min(hardMaxWorkingQty, maxByOrderLimitQty);
+
+      if (minExecutableQty > allowedMaxQty + 1e-12) {
+        setAccumulationStatus(\`SMART \${position.symbol}: minimum Bybit lub limit zlecenia nie pozwala bezpiecznie ruszyć części roboczej.\`);
         continue;
       }
-      const qty = Math.min(hardMaxWorkingQty, Math.max(position.qty * configuredShare, minExecutableQty));
+
+      const qty = Math.min(allowedMaxQty, Math.max(configuredQty, minExecutableQty));
       const estimatedQuote = qty * sellPrice;
-      if (qty <= 0 || estimatedQuote <= 0) continue;
+      if (qty <= 0 || estimatedQuote <= 0 || estimatedQuote > maxOrderUsdt + 1e-8) continue;
 
       sellBusyRef.current = true;
       setBusy(true);
-      setSmartStatus(`SMART ACCUMULATION: ${position.symbol} potwierdził lokalną górkę. Sprzedaję część roboczą...`);
+      setAccumulationStatus(\`SMART ACTIVE: \${position.symbol} potwierdził lokalną górkę + cofnięcie. Sprzedaję \${(qty / position.qty * 100).toFixed(2)}% pozycji roboczej...\`);
       try {
         const ack = await placeSpotMarketSellBase(credentials, position.symbol, qty, 'smart');
         const fill = await waitForSpotFill(credentials, ack.orderId);
@@ -837,41 +852,45 @@ export const TradeScreen: React.FC<Props> = ({
 
         const remainingQty = Math.max(0, position.qty - soldQty);
         const remainingCost = Math.max(0, position.costUsdt - soldCost);
-        const updated = livePositionsRef.current.map((item) => item.id === position.id ? {
+        livePositionsRef.current = livePositionsRef.current.map((item) => item.id === position.id ? {
           ...item,
           qty: remainingQty,
           costUsdt: remainingCost,
           currentPnlUsdt: 0,
           sellReady: false,
         } : item);
-        livePositionsRef.current = updated;
-        setLivePositions([...updated]);
+        setLivePositions([...livePositionsRef.current]);
 
+        const targetFromDrop = actualSellPrice * (1 - ACCUMULATION_REBUY_DROP_PCT / 100);
+        const targetForCoinGain = soldQty > 0
+          ? (soldQuoteUsdt / (soldQty * (1 + ACCUMULATION_MIN_COIN_GAIN_PCT / 100))) * (1 - REBUY_COST_BUFFER_PCT / 100)
+          : targetFromDrop;
         const cycle: AccumulationCycle = {
           symbol: position.symbol,
           soldQty,
           soldQuoteUsdt,
           sellPrice: actualSellPrice,
-          targetBuyPrice: Math.min(
-            actualSellPrice * (1 - ACCUMULATION_REBUY_DROP_PCT / 100),
-            (soldQuoteUsdt / soldQty) * (1 - REBUY_COST_BUFFER_PCT / 100)
-          ),
+          targetBuyPrice: Math.min(targetFromDrop, targetForCoinGain),
           startedAt: Date.now(),
         };
         accumulationRef.current.set(cycle.symbol, cycle);
         setAccumulationCycles(Array.from(accumulationRef.current.values()));
         sessionProfitRef.current += realizedPnl;
         setSessionProfit(sessionProfitRef.current);
-        setSmartStatus(`SMART ACCUMULATION SELL ${position.symbol}: ${soldQty.toPrecision(7)} sprzedane po ${priceText(actualSellPrice)}. Czekam na odkup ≤ ${priceText(cycle.targetBuyPrice)}.`);
+        setAccumulationStatus(\`SMART SELL \${position.symbol}: \${soldQty.toPrecision(7)} po \${priceText(actualSellPrice)} • netto \${realizedPnl >= 0 ? '+' : ''}\${realizedPnl.toFixed(4)} USDT. Odkup przy ≤ \${priceText(cycle.targetBuyPrice)}.\`);
         await refreshAvailableUsdt();
         return true;
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : 'Błąd SELL.';
+        setError(message);
+        setAccumulationStatus(\`SMART SELL nieudany: \${message}. Monitoruję dalej.\`);
+        return false;
       } finally {
         sellBusyRef.current = false;
         setBusy(false);
       }
     }
     return false;
-    */
   };
 
   const tryFinishAccumulation = async (symbol?: string): Promise<boolean> => {
@@ -901,8 +920,12 @@ export const TradeScreen: React.FC<Props> = ({
     sellBusyRef.current = true;
     setBusy(true);
     try {
-      const spend = cycle.soldQuoteUsdt;
-      const ack = await placeSpotMarketOrder(credentials, cycle.symbol, 'Buy', spend, Math.max(maxOrderUsdt, spend));
+      const spend = Math.min(cycle.soldQuoteUsdt, maxOrderUsdt);
+      if (spend + 1e-8 < cycle.soldQuoteUsdt) {
+        setAccumulationStatus(\`SMART BUY BACK \${cycle.symbol}: limit pojedynczego zlecenia \${maxOrderUsdt.toFixed(2)} USDT jest niższy niż środki z cyklu \${cycle.soldQuoteUsdt.toFixed(2)} USDT. Czekam na zmianę limitu.\`);
+        return false;
+      }
+      const ack = await placeSpotMarketOrder(credentials, cycle.symbol, 'Buy', spend, maxOrderUsdt);
       const fill = await waitForSpotFill(credentials, ack.orderId);
       const baseCoin = cycle.symbol.replace(/USDT$/, '');
       const boughtQty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
@@ -1089,13 +1112,11 @@ export const TradeScreen: React.FC<Props> = ({
             livePositionsRef.current = [...happyOwned, ...smartOwned];
             setLivePositions([...livePositionsRef.current]);
 
-            // First harvest profitable wallet positions, then handle any pending rebuy cycle.
-            // This prevents an old position from sitting in profit after an upgrade while SMART
-            // only watches positions created in the current process.
-            // Strategic CORE is accumulation-only. Never harvest/sell BTC/ETH/SOL/XRP/
-            // PEPE/FLOKI/VELO to create USDT. Profitable USDT cycles fund dip purchases instead.
+            // SMART ACTIVE rotates only the configured working slice (1–10%) of CORE coins.
+            // The rest of the holding stays untouched. SELL is followed by a lower BUY BACK
+            // only when the expected base-coin quantity increases after fees.
             if (!accumulationStopRef.current) {
-              await tryStartAccumulation(); // accumulation-only policy returns no CORE sell candidates
+              await tryStartAccumulation();
               await tryBuyStrategicDip();
             }
             for (const activeCycle of Array.from(accumulationRef.current.values())) {
@@ -1104,7 +1125,7 @@ export const TradeScreen: React.FC<Props> = ({
             }
 
             const freeUsdtNow = await refreshAvailableUsdt();
-            setAccumulationStatus(`SMART TOTAL CAPITAL: CORE/HOLD ${smartOwned.length} • fundusz dokupienia ${coreAccumulationFundRef.current.toFixed(4)} USDT • wolne USDT ${freeUsdtNow.toFixed(2)}. CORE: tylko gromadzenie, bez automatycznej sprzedaży.`);
+            setAccumulationStatus(`SMART ACTIVE: monitoruję ${smartOwned.length} coinów • część robocza ${Math.min(10, Math.max(1, toNumber(accumulationShare) || 5)).toFixed(1)}% • fundusz dokupienia ${coreAccumulationFundRef.current.toFixed(4)} USDT • wolne USDT ${freeUsdtNow.toFixed(2)}. Sprzedaję tylko część roboczą po potwierdzonej górce i odkupuję niżej.`);
             await sleep(900);
           } catch (e: unknown) {
             setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
@@ -1447,9 +1468,9 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smartSub}>Oddzielny silnik • własne pozycje • nie uruchamia i nie zatrzymuje Happy Hour</Text>
             </View>
           </View>
-          <Text style={styles.smartNotice}>SMART TOTAL CAPITAL prowadzi dwa niezależne koszyki: CORE COINS mają zwiększać liczbę sztuk, a wolne USDT mają zwiększać saldo USDT przez osobne krótkie transakcje. Bot nie sprzedaje CORE po to, żeby tworzyć USDT.</Text>
+          <Text style={styles.smartNotice}>SMART ACTIVE buduje liczbę coinów przez obrót tylko częścią roboczą portfela. BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO: po lokalnej górce bot może sprzedać 1–10% pozycji, a następnie odkupić niżej tak, aby po opłatach zwiększyć liczbę sztuk. Pozostała część pozycji nie jest ruszana.</Text>
           {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
-          <Text style={styles.smallLabel}>Working slice (%) — 1–10%, domyślnie 5%</Text>
+          <Text style={styles.smallLabel}>Część robocza SMART (%) — 1–10%, domyślnie 5%</Text>
           <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
           <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Wybrane do Smart: ${managedHoldings.length || (initialHolding ? 1 : 0)}`}</Text>
           <Text style={styles.accLine}>Zmiana ilości coina: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
