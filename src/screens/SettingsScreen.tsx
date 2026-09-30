@@ -212,10 +212,29 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           <Switch value={aiEnabled} onValueChange={setAiEnabled} />
         </View>
         <Text style={styles.updateHint}>SHADOW może działać lokalnie bez internetu i bez adresu HTTPS — analizuje dane rynkowe dostępne w aplikacji i zapisuje historię w pamięci telefonu. AUTO AI może autoryzować realny BUY po analizie, dlatego nadal wymaga bezpiecznego backendu HTTPS.</Text>
-        <View style={styles.aiHeader}><Text style={styles.inputLabel}>AUTO AI — realne transakcje</Text><Switch value={aiAutoEnabled} onValueChange={setAiAutoEnabled} disabled={!aiEnabled} /></View>
-        <Text style={styles.inputLabel}>Endpoint AI — wymagany tylko dla AUTO AI</Text>
-        <TextInput style={styles.input} value={aiEndpoint} onChangeText={setAiEndpoint} autoCapitalize="none" autoCorrect={false} placeholder="Opcjonalnie dla SHADOW • https://twoj-serwer.example/ai/advice" placeholderTextColor="#666666" />
-        <Text style={styles.aiWarning}>{aiAutoEnabled ? 'AUTO AI wymaga HTTPS. Nie wpisuj tutaj klucza OpenAI — klucz powinien być tylko po stronie backendu.' : 'SHADOW bez endpointu działa lokalnie i zapisuje wyniki w pamięci telefonu.'}</Text>
+        <View style={styles.aiHeader}>
+          <Text style={styles.inputLabel}>AUTO AI — realne transakcje</Text>
+          <Switch
+            value={aiAutoEnabled}
+            onValueChange={(value) => {
+              setAiAutoEnabled(value);
+              if (!value) setAiEndpoint('');
+            }}
+            disabled={!aiEnabled}
+          />
+        </View>
+        {!aiAutoEnabled ? (
+          <View style={styles.localShadowBox}>
+            <Text style={styles.localShadowTitle}>LOCAL SHADOW — BEZ LINKU</Text>
+            <Text style={styles.localShadowText}>Analiza działa lokalnie w telefonie. Endpoint HTTP/HTTPS nie jest potrzebny i nie jest zapisywany.</Text>
+          </View>
+        ) : (
+          <>
+            <Text style={styles.inputLabel}>HTTPS endpoint backendu AUTO AI</Text>
+            <TextInput style={styles.input} value={aiEndpoint} onChangeText={setAiEndpoint} autoCapitalize="none" autoCorrect={false} placeholder="https://twoj-serwer.example/ai/advice" placeholderTextColor="#666666" />
+            <Text style={styles.aiWarning}>AUTO AI wymaga HTTPS. Nie wpisuj tutaj klucza OpenAI — klucz powinien być tylko po stronie backendu.</Text>
+          </>
+        )}
         <TouchableOpacity style={[styles.limitButton, aiSaving && styles.disabledButton]} onPress={saveAiConfig} disabled={aiSaving}>
           {aiSaving ? <ActivityIndicator color="#000000" /> : <Text style={styles.limitButtonText}>Zapisz konfigurację AI</Text>}
         </TouchableOpacity>
@@ -315,4 +334,7 @@ const styles = StyleSheet.create({
   aiHeaderText: { flex: 1 },
   aiBadge: { color: '#00E5FF', fontSize: 10, fontWeight: '900', marginTop: -8, marginBottom: 10 },
   aiWarning: { color: '#FFB74D', fontSize: 11, lineHeight: 16, marginTop: 8 },
+  localShadowBox: { backgroundColor: '#10251A', borderWidth: 1, borderColor: '#00E676', borderRadius: 8, padding: 10, marginTop: 8 },
+  localShadowTitle: { color: '#00E676', fontSize: 11, fontWeight: '900', marginBottom: 4 },
+  localShadowText: { color: '#C7D7CC', fontSize: 11, lineHeight: 16 },
 });
