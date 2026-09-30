@@ -1,6 +1,6 @@
 {
   "name": "bybit-trading-app",
-  "version": "1.8.7",
+  "version": "1.8.8",
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
