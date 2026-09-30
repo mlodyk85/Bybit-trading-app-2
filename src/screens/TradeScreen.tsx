@@ -827,7 +827,7 @@ export const TradeScreen: React.FC<Props> = ({
       const allowedMaxQty = Math.min(hardMaxWorkingQty, maxByOrderLimitQty);
 
       if (minExecutableQty > allowedMaxQty + 1e-12) {
-        setAccumulationStatus(\`SMART \${position.symbol}: minimum Bybit lub limit zlecenia nie pozwala bezpiecznie ruszyć części roboczej.\`);
+        setAccumulationStatus(`SMART ${position.symbol}: minimum Bybit lub limit zlecenia nie pozwala bezpiecznie ruszyć części roboczej.`);
         continue;
       }
 
@@ -837,7 +837,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       sellBusyRef.current = true;
       setBusy(true);
-      setAccumulationStatus(\`SMART ACTIVE: \${position.symbol} potwierdził lokalną górkę + cofnięcie. Sprzedaję \${(qty / position.qty * 100).toFixed(2)}% pozycji roboczej...\`);
+      setAccumulationStatus(`SMART ACTIVE: ${position.symbol} potwierdził lokalną górkę + cofnięcie. Sprzedaję ${(qty / position.qty * 100).toFixed(2)}% pozycji roboczej...`);
       try {
         const ack = await placeSpotMarketSellBase(credentials, position.symbol, qty, 'smart');
         const fill = await waitForSpotFill(credentials, ack.orderId);
@@ -877,13 +877,13 @@ export const TradeScreen: React.FC<Props> = ({
         setAccumulationCycles(Array.from(accumulationRef.current.values()));
         sessionProfitRef.current += realizedPnl;
         setSessionProfit(sessionProfitRef.current);
-        setAccumulationStatus(\`SMART SELL \${position.symbol}: \${soldQty.toPrecision(7)} po \${priceText(actualSellPrice)} • netto \${realizedPnl >= 0 ? '+' : ''}\${realizedPnl.toFixed(4)} USDT. Odkup przy ≤ \${priceText(cycle.targetBuyPrice)}.\`);
+        setAccumulationStatus(`SMART SELL ${position.symbol}: ${soldQty.toPrecision(7)} po ${priceText(actualSellPrice)} • netto ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(4)} USDT. Odkup przy ≤ ${priceText(cycle.targetBuyPrice)}.`);
         await refreshAvailableUsdt();
         return true;
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : 'Błąd SELL.';
         setError(message);
-        setAccumulationStatus(\`SMART SELL nieudany: \${message}. Monitoruję dalej.\`);
+        setAccumulationStatus(`SMART SELL nieudany: ${message}. Monitoruję dalej.`);
         return false;
       } finally {
         sellBusyRef.current = false;
@@ -922,7 +922,7 @@ export const TradeScreen: React.FC<Props> = ({
     try {
       const spend = Math.min(cycle.soldQuoteUsdt, maxOrderUsdt);
       if (spend + 1e-8 < cycle.soldQuoteUsdt) {
-        setAccumulationStatus(\`SMART BUY BACK \${cycle.symbol}: limit pojedynczego zlecenia \${maxOrderUsdt.toFixed(2)} USDT jest niższy niż środki z cyklu \${cycle.soldQuoteUsdt.toFixed(2)} USDT. Czekam na zmianę limitu.\`);
+        setAccumulationStatus(`SMART BUY BACK ${cycle.symbol}: limit pojedynczego zlecenia ${maxOrderUsdt.toFixed(2)} USDT jest niższy niż środki z cyklu ${cycle.soldQuoteUsdt.toFixed(2)} USDT. Czekam na zmianę limitu.`);
         return false;
       }
       const ack = await placeSpotMarketOrder(credentials, cycle.symbol, 'Buy', spend, maxOrderUsdt);
