@@ -96,16 +96,15 @@ export async function loadAiAdvisorConfig(): Promise<AiAdvisorConfig> {
 }
 
 export async function saveAiAdvisorConfig(config: AiAdvisorConfig): Promise<void> {
-  const endpointUrl = config.endpointUrl.trim();
-  if (config.enabled && config.mode === 'auto' && !/^https:\/\//i.test(endpointUrl)) {
-    throw new Error('AUTO AI wymaga bezpiecznego adresu HTTPS. SHADOW może działać lokalnie bez serwera.');
-  }
-  if (endpointUrl && !/^https:\/\//i.test(endpointUrl)) {
-    throw new Error('Jeśli podajesz endpoint AI, musi zaczynać się od https://');
+  const mode = config.mode === 'auto' ? 'auto' : 'shadow';
+  // SHADOW is always local/offline. Never validate or persist an endpoint for this mode.
+  const endpointUrl = mode === 'auto' ? config.endpointUrl.trim() : '';
+  if (config.enabled && mode === 'auto' && !/^https:\/\//i.test(endpointUrl)) {
+    throw new Error('AUTO AI wymaga bezpiecznego adresu HTTPS.');
   }
   await SecureStore.setItemAsync(CONFIG_KEY, JSON.stringify({
     enabled: config.enabled,
-    mode: config.mode === 'auto' ? 'auto' : 'shadow',
+    mode,
     endpointUrl,
     timeoutMs: Math.max(1500, Math.min(10000, config.timeoutMs)),
     minConfidence: Math.max(0.5, Math.min(0.95, config.minConfidence)),
