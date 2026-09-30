@@ -477,14 +477,49 @@ export const TradeScreen: React.FC<Props> = ({
       const volatilityPct = now.low24h > 0 ? ((now.high24h - now.low24h) / now.low24h) * 100 / Math.sqrt(24) : Math.abs(windowMomentumPct);
       adaptiveRows.push({ market: now, windowMomentumPct, shortMomentumPct, score: 0, regime: 'RANGE', strategy: 'NONE', volatilityPct });
     }
-    const ranked = rankAdaptiveOpportunities(adaptiveRows.map((row) => ({
-      symbol: row.market.symbol, change24hPct: row.market.change24hPct,
-      windowMomentumPct: row.windowMomentumPct, shortMomentumPct: row.shortMomentumPct,
-      spreadPct: row.market.spreadPct, turnover24h: row.market.turnover24h, volatilityPct: row.volatilityPct,
-    })), 2);
-    const winner = ranked[0];
-    const source = winner ? adaptiveRows.find((row) => row.market.symbol === winner.symbol) : undefined;
-    const best = winner && source ? { ...source, score: winner.score, regime: winner.regime, strategy: winner.strategy } : null;
+    let best: SmartCandidateScore | null = null;
+
+    if (smartMode === 'liquid') {
+      // LIQUID SCALP deliberately trades BTC/XRP/ETH/SOL, which are CORE symbols.
+      // The generic adaptive ranker excludes CORE, so rank these four locally instead.
+      const liquidRows = adaptiveRows
+        .filter((row) => LIQUID_SCALP_SYMBOLS.has(row.market.symbol))
+        .filter((row) => row.market.turnover24h >= 1_000_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.20)
+        .filter((row) => row.shortMomentumPct > 0 || (row.windowMomentumPct < 0 && row.shortMomentumPct >= -0.01))
+        .map((row) => ({
+          ...row,
+          regime: row.shortMomentumPct > 0.03 ? 'TREND_UP' as MarketRegime : 'RANGE' as MarketRegime,
+          strategy: row.shortMomentumPct > 0.03 ? 'MOMENTUM_BREAKOUT' as EntryStrategy : 'RANGE_GRID' as EntryStrategy,
+          score: row.shortMomentumPct * 320 - row.market.spreadPct * 160 + Math.log10(Math.max(1, row.market.turnover24h)) * 3,
+        }))
+        .sort((a, b) => b.score - a.score);
+      best = liquidRows[0] || null;
+    } else {
+      const ranked = rankAdaptiveOpportunities(adaptiveRows.map((row) => ({
+        symbol: row.market.symbol, change24hPct: row.market.change24hPct,
+        windowMomentumPct: row.windowMomentumPct, shortMomentumPct: row.shortMomentumPct,
+        spreadPct: row.market.spreadPct, turnover24h: row.market.turnover24h, volatilityPct: row.volatilityPct,
+      })), 2);
+      const winner = ranked[0];
+      const source = winner ? adaptiveRows.find((row) => row.market.symbol === winner.symbol) : undefined;
+      best = winner && source ? { ...source, score: winner.score, regime: winner.regime, strategy: winner.strategy } : null;
+
+      if (!best && smartMode === 'aggressive') {
+        // Aggressive mode must not sit idle just because the standard filter is too strict.
+        // Use a wider but still liquidity/spread-gated fallback on non-CORE Spot pairs.
+        const aggressiveFallback = adaptiveRows
+          .filter((row) => row.market.turnover24h >= 500_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.35)
+          .filter((row) => row.shortMomentumPct > 0.005 || (row.windowMomentumPct < -0.02 && row.shortMomentumPct > -0.005))
+          .map((row) => ({
+            ...row,
+            regime: row.shortMomentumPct > 0.02 ? 'TREND_UP' as MarketRegime : 'RANGE' as MarketRegime,
+            strategy: row.shortMomentumPct > 0.02 ? 'MOMENTUM_BREAKOUT' as EntryStrategy : 'RANGE_GRID' as EntryStrategy,
+            score: row.shortMomentumPct * 260 - row.market.spreadPct * 120 + Math.log10(Math.max(1, row.market.turnover24h)) * 2,
+          }))
+          .sort((a, b) => b.score - a.score);
+        best = aggressiveFallback[0] || null;
+      }
+    }
     setActiveScore(best);
     if (best) {
       setScanInfo(`WEJŚCIE ${best.market.symbol} • ${best.regime}/${best.strategy} • 24h ${best.market.change24hPct >= 0 ? '+' : ''}${best.market.change24hPct.toFixed(2)}% • ruch ${best.windowMomentumPct.toFixed(4)}% • spread ${best.market.spreadPct.toFixed(3)}%`);
