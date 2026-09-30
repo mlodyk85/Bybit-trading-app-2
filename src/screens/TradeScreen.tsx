@@ -51,7 +51,7 @@ interface Props {
   onHoldingConsumed?: () => void;
 }
 
-type SmartMode = 'shadow' | 'assist' | 'aggressive';
+type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'liquid';
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -109,6 +109,10 @@ const AGGRESSIVE_AUTO_SELL_PROFIT_PCT = 0.18;
 const AGGRESSIVE_MAX_SLOTS = 6;
 const AGGRESSIVE_SCAN_SAMPLES = 5;
 const AGGRESSIVE_SCAN_INTERVAL_MS = 650;
+const LIQUID_SCALP_SYMBOLS = new Set(['BTCUSDT', 'XRPUSDT', 'ETHUSDT', 'SOLUSDT']);
+const LIQUID_SCALP_MIN_CAPITAL_USDT = 50;
+const LIQUID_SCALP_MAX_CAPITAL_USDT = 300;
+const LIQUID_SCALP_MIN_GROSS_TARGET_PCT = 0.65;
 const SPOT_MAKER_FEE_PCT = 0.075;
 const SPOT_TAKER_FEE_PCT = 0.075;
 const MARKET_ROUND_TRIP_FEE_PCT = SPOT_TAKER_FEE_PCT * 2;
@@ -150,6 +154,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [maxCycles, setMaxCycles] = useState('1000');
   const [maxSlots, setMaxSlots] = useState('2');
   const [shadowCapital, setShadowCapital] = useState('25');
+  const [liquidCapital, setLiquidCapital] = useState('100');
   const [shadowUsdt, setShadowUsdt] = useState(25);
   const [availableUsdt, setAvailableUsdt] = useState(0);
   const [sessionProfit, setSessionProfit] = useState(0);
@@ -409,17 +414,25 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const stopSmart = () => {
-    // Only this explicit user action is allowed to disable Happy Hour.
     stopRef.current = true;
     void setTradingRunRequested('happy-hour', false);
-    setSmartStatus('STOP RĘCZNY: kończę skanowanie. Otwarte pozycje SMART AUTO pozostają bez zmian.');
+    setSmartStatus('STOP RĘCZNY: kończę skanowanie. Otwarte pozycje i zlecenia SELL na Bybit pozostają bez zmian.');
+  };
+
+  const disableHappyHour = () => {
+    stopSmart();
+    setSmartMode('off');
+    setScanInfo('');
+    setActiveScore(null);
+    setSmartStatus('HAPPY HOUR WYŁĄCZONY — skaner nie otwiera nowych transakcji.');
   };
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
     const scanNo = scanCountRef.current + 1;
     const scanSamples = smartMode === 'aggressive' ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
     const scanIntervalMs = smartMode === 'aggressive' ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
-    setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${smartMode === 'aggressive' ? ' • AGGRESSIVE BASKET' : ''}...`);
+    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE BASKET' : smartMode === 'liquid' ? ' • LIQUID SCALP' : '';
+    setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${modeLabel}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
 
@@ -441,8 +454,12 @@ export const TradeScreen: React.FC<Props> = ({
     let bestObserved: { symbol: string; momentum: number; spread: number } | null = null;
 
     for (const now of latest) {
-      // Strategic CORE is excluded at scanner level as well as execution level.
-      if (STRATEGIC_CORE_SYMBOLS.has(now.symbol)) continue;
+      if (smartMode === 'liquid') {
+        if (!LIQUID_SCALP_SYMBOLS.has(now.symbol)) continue;
+      } else {
+        // Standard Happy Hour never trades strategic CORE.
+        if (STRATEGIC_CORE_SYMBOLS.has(now.symbol)) continue;
+      }
       const history = tracks.get(now.symbol) || [];
       if (history.length < 4) continue;
       const first = history[0];
@@ -549,10 +566,11 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
-    if (!candidate || stopRef.current || (smartMode !== 'assist' && smartMode !== 'aggressive')) return;
-    // Hard safety wall: Happy Hour / USDT-growth must never trade strategic CORE.
-    // CORE is purchased only by tryBuyStrategicDip() from realized-profit allocation.
-    if (STRATEGIC_CORE_SYMBOLS.has(candidate.market.symbol)) {
+    if (!candidate || stopRef.current || !['assist', 'aggressive', 'liquid'].includes(smartMode)) return;
+    if (smartMode === 'liquid' && !LIQUID_SCALP_SYMBOLS.has(candidate.market.symbol)) return;
+    // Standard Happy Hour does not touch CORE. LIQUID SCALP may trade a newly purchased
+    // BTC/XRP/ETH/SOL lot, but the SELL quantity is limited to that exact new fill.
+    if (smartMode !== 'liquid' && STRATEGIC_CORE_SYMBOLS.has(candidate.market.symbol)) {
       setSmartStatus(`CORE LOCK: ${candidate.market.symbol} pominięty przez silnik handlowy — tylko akumulacja.`);
       return;
     }
@@ -614,7 +632,9 @@ export const TradeScreen: React.FC<Props> = ({
           // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
           // The floor still covers fees/slippage; the cap prevents an unrealistic distant exit.
           const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
-          const dynamicProfitPct = exitPolicy.takeProfitPct;
+          const dynamicProfitPct = smartMode === 'liquid'
+            ? Math.max(LIQUID_SCALP_MIN_GROSS_TARGET_PCT, exitPolicy.takeProfitPct)
+            : exitPolicy.takeProfitPct;
           const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
           const makerNetTarget = position.qty > 0
             ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
@@ -640,7 +660,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       livePositionsRef.current = [...livePositionsRef.current, trackedPosition];
       setLivePositions([...livePositionsRef.current]);
-      setSmartStatus(`HAPPY HOUR BUY ${trackedPosition.symbol}: ${trade.toFixed(2)} USDT • ${exitStatus}.`);
+      setSmartStatus(`${smartMode === 'liquid' ? 'LIQUID SCALP' : 'HAPPY HOUR'} BUY ${trackedPosition.symbol}: ${trade.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd BUY.';
@@ -1112,15 +1132,25 @@ export const TradeScreen: React.FC<Props> = ({
 
   const startSmart = (restored = false) => {
     if (smartRunningRef.current) return;
-    const trade = toNumber(amount);
+    if (smartMode === 'off') return setError('HAPPY HOUR jest wyłączony. Wybierz tryb handlu.');
+    const trade = smartMode === 'liquid' ? toNumber(liquidCapital) : toNumber(amount);
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
     const requestedSlots = Math.floor(toNumber(maxSlots)) || 1;
-    const slots = Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 3, requestedSlots));
+    const slots = smartMode === 'liquid'
+      ? 1
+      : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
 
-    if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) return setError(`Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
+    if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) {
+      return setError(smartMode === 'liquid'
+        ? `LIQUID SCALP: kapitał musi być <= globalnego limitu ${maxOrderUsdt} USDT. Zwiększ limit w Ustawieniach, jeśli chcesz użyć większej kwoty.`
+        : `Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
+    }
+    if (smartMode === 'liquid' && (trade < LIQUID_SCALP_MIN_CAPITAL_USDT || trade > LIQUID_SCALP_MAX_CAPITAL_USDT)) {
+      return setError(`LIQUID SCALP: ustaw kapitał ${LIQUID_SCALP_MIN_CAPITAL_USDT}–${LIQUID_SCALP_MAX_CAPITAL_USDT} USDT.`);
+    }
     if (trade < SMART_MIN_TRADE_USDT) return setError(`SMART AUTO i DEMO wymagają minimum ${SMART_MIN_TRADE_USDT} USDT na jedną pozycję.`);
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
@@ -1152,7 +1182,9 @@ export const TradeScreen: React.FC<Props> = ({
     setActiveScore(null);
     setScanInfo(smartMode === 'aggressive'
       ? `AGGRESSIVE BASKET • do ${slots} równoległych pozycji • szybki skan • bez GTC SELL • MARKET SELL dopiero po dodatnim wyniku netto`
-      : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
+      : smartMode === 'liquid'
+        ? `LIQUID SCALP • BTC/XRP/ETH/SOL • kapitał ${trade.toFixed(2)} USDT • 1 pozycja • po BUY natychmiast wystawiam GTC LIMIT SELL widoczny na Bybit`
+        : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
 
     if (smartMode === 'shadow') {
       shadowUsdtRef.current = virtualCapital;
@@ -1352,11 +1384,19 @@ export const TradeScreen: React.FC<Props> = ({
           <Text style={styles.smartNotice}>HAPPY HOUR działa niezależnie od ręcznie wybranej pary i portfela: skanuje rynek Spot/USDT, wybiera kandydatów i zarządza własnymi pozycjami. Ręczny Trade pozostaje zawsze dostępny.</Text>
 
             <View style={styles.modeRow}>
+              <TouchableOpacity onPress={disableHappyHour} style={[styles.modeButton, styles.offModeButton, smartMode === 'off' && styles.modeSelected]}><Text style={styles.modeText}>OFF</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('liquid'); setMaxSlots('1'); }} style={[styles.modeButton, smartMode === 'liquid' && styles.modeSelected]}><Text style={styles.modeText}>LIQUID SCALP</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
-            {smartMode === 'aggressive' && <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: Spot/USDT, do 6 równoległych pozycji, szybszy skan i aktywne wyjście po dodatnim PnL netto. Ten tryb nie wystawia nowych długoterminowych GTC SELL, więc kapitał nie jest celowo blokowany w oczekujących zleceniach.</Text>}
+            {smartMode === 'aggressive' && <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: Spot/USDT, do 6 równoległych pozycji, szybszy skan i aktywne wyjście po dodatnim PnL netto. Ten tryb nie wystawia nowych długoterminowych GTC SELL.</Text>}
+            {smartMode === 'liquid' && <>
+              <Text style={styles.liquidNotice}>LIQUID SCALP: tylko BTC/XRP/ETH/SOL. Jedna większa pozycja. Po BUY bot od razu wystawia GTC LIMIT SELL na Bybit dla dokładnie kupionej ilości.</Text>
+              <Text style={styles.smallLabel}>Kapitał LIQUID SCALP (50–300 USDT)</Text>
+              <TextInput value={liquidCapital} onChangeText={setLiquidCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.capitalHint}>Globalny limit pojedynczej transakcji: {maxOrderUsdt.toFixed(2)} USDT. Kapitał LIQUID SCALP nie może go przekroczyć.</Text>
+            </>}
 
             <View style={styles.grid}>
               <View style={styles.field}><Text style={styles.smallLabel}>Cel zysku (0 = bez limitu)</Text><TextInput value={targetProfit} onChangeText={setTargetProfit} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></View>
@@ -1395,7 +1435,9 @@ export const TradeScreen: React.FC<Props> = ({
           {smartRunning && <Text style={styles.runningHint}>Aby zmienić tryb, najpierw zatrzymaj aktualnie pracujący silnik.</Text>}
           {smartRunning
             ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
-            : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
+            : smartMode === 'off'
+              ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
+              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
@@ -1470,8 +1512,13 @@ const styles = StyleSheet.create({
   runningHint: { color: '#FFB74D', fontSize: 11, lineHeight: 16, marginBottom: 8 },
   smartNotice: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   aggressiveNotice: { color: '#FBBF24', fontSize: 11, lineHeight: 16, marginBottom: 10, backgroundColor: '#2A220E', borderWidth: 1, borderColor: '#92400E', borderRadius: 8, padding: 9 },
-  modeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
-  modeButton: { flex: 1, backgroundColor: '#242424', borderWidth: 1, borderColor: '#3F3F46', padding: 10, borderRadius: 9, alignItems: 'center' },
+  liquidNotice: { color: '#67E8F9', fontSize: 11, lineHeight: 16, marginBottom: 8, backgroundColor: '#0C2730', borderWidth: 1, borderColor: '#155E75', borderRadius: 8, padding: 9 },
+  capitalHint: { color: '#A1A1AA', fontSize: 10, lineHeight: 15, marginTop: 5 },
+  offStatusBox: { borderWidth: 1, borderColor: '#7F1D1D', backgroundColor: '#2A1515', borderRadius: 10, padding: 12, alignItems: 'center' },
+  offStatusText: { color: '#FCA5A5', fontSize: 12, fontWeight: '900' },
+  modeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
+  modeButton: { minWidth: '30%', flexGrow: 1, backgroundColor: '#242424', borderWidth: 1, borderColor: '#3F3F46', padding: 10, borderRadius: 9, alignItems: 'center' },
+  offModeButton: { borderColor: '#7F1D1D' },
   modeSelected: { borderColor: '#F0B90B', backgroundColor: '#302A12' },
   modeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
   grid: { flexDirection: 'row', gap: 10 },
