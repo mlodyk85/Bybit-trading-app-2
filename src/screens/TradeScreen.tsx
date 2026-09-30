@@ -7,7 +7,6 @@ import {
   SafeAreaView,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   TouchableOpacity,
@@ -142,7 +141,6 @@ export const TradeScreen: React.FC<Props> = ({
   const [pairsLoading, setPairsLoading] = useState(true);
   const [market, setMarket] = useState<SpotMarketSnapshot | null>(null);
 
-  const [smartEnabled, setSmartEnabled] = useState(Boolean(initialHolding) || initialHoldings.length > 0);
   const [smartMode, setSmartMode] = useState<SmartMode>('assist');
   const [smartRunning, setSmartRunning] = useState(false); // Happy Hour engine
   const [accumulationRunning, setAccumulationRunning] = useState(false); // Smart engine
@@ -194,7 +192,6 @@ export const TradeScreen: React.FC<Props> = ({
       setSymbol(initialSymbol.toUpperCase());
       onHoldingConsumed?.();
     }
-    if (initialHolding) setSmartEnabled(true);
     setManagedHoldings(initialHoldings);
 
   }, [initialHolding, initialHoldings, initialSymbol, onHoldingConsumed]);
@@ -1346,14 +1343,13 @@ export const TradeScreen: React.FC<Props> = ({
         <View style={styles.smartCard}>
           <View style={styles.smartHeader}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.smartTitle}>HAPPY HOUR</Text>
-              <Text style={styles.smartSub}>Bot sam wybiera szybkie pary USDT • BUY • HOLD • SELL</Text>
+              <Text style={styles.smartTitle}>HAPPY HOUR — TRYB HANDLU</Text>
+              <Text style={styles.smartSub}>Wybierz tryb poniżej. Panel jest zawsze otwarty.</Text>
             </View>
-            <Switch value={smartEnabled} onValueChange={(value) => { if (!smartRunning) setSmartEnabled(value); }} disabled={smartRunning} />
+            <Text style={styles.modeStatus}>{smartRunning ? '● PRACUJE' : '○ GOTOWY'}</Text>
           </View>
 
-          {smartEnabled && <>
-            <Text style={styles.smartNotice}>HAPPY HOUR działa niezależnie od ręcznie wybranej pary i portfela: skanuje rynek Spot/USDT, wybiera kandydatów i zarządza własnymi pozycjami. Ręczny Trade pozostaje zawsze dostępny.</Text>
+          <Text style={styles.smartNotice}>HAPPY HOUR działa niezależnie od ręcznie wybranej pary i portfela: skanuje rynek Spot/USDT, wybiera kandydatów i zarządza własnymi pozycjami. Ręczny Trade pozostaje zawsze dostępny.</Text>
 
             <View style={styles.modeRow}>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
@@ -1396,10 +1392,10 @@ export const TradeScreen: React.FC<Props> = ({
               </View></View>;
             })}
 
-            {smartRunning
-              ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
-          </>}
+          {smartRunning && <Text style={styles.runningHint}>Aby zmienić tryb, najpierw zatrzymaj aktualnie pracujący silnik.</Text>}
+          {smartRunning
+            ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
+            : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
@@ -1470,6 +1466,8 @@ const styles = StyleSheet.create({
   smartHeader: { flexDirection: 'row', alignItems: 'center' },
   smartTitle: { color: '#F0B90B', fontSize: 18, fontWeight: '900' },
   smartSub: { color: '#8E8E93', fontSize: 10, marginTop: 3, paddingRight: 8 },
+  modeStatus: { color: '#F0B90B', fontSize: 10, fontWeight: '900', marginLeft: 8 },
+  runningHint: { color: '#FFB74D', fontSize: 11, lineHeight: 16, marginBottom: 8 },
   smartNotice: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   aggressiveNotice: { color: '#FBBF24', fontSize: 11, lineHeight: 16, marginBottom: 10, backgroundColor: '#2A220E', borderWidth: 1, borderColor: '#92400E', borderRadius: 8, padding: 9 },
   modeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
