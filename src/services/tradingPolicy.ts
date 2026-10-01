@@ -4,15 +4,21 @@ export const CORE_SYMBOLS = Object.freeze([
 
 const CORE_SET: ReadonlySet<string> = new Set(CORE_SYMBOLS);
 
-export type TradingEngineOwner = 'happy-hour' | 'smart' | 'manual';
+export type TradingEngineOwner = 'happy-hour' | 'smart' | 'liquid' | 'manual';
 
 export function normalizeSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
 }
 
-/** CORE is accumulation-only. No autonomous active-trading path may sell it. */
+/**
+ * CORE protection:
+ * - generic Happy Hour cannot sell CORE balances;
+ * - SMART may sell only the working slice selected by its caller;
+ * - LIQUID may sell only the exact lot it just bought;
+ * - manual is always user-authorized.
+ */
 export function assertAutonomousSellAllowed(owner: TradingEngineOwner, symbol: string): void {
-  if (owner !== 'manual' && CORE_SET.has(normalizeSymbol(symbol))) {
+  if (owner === 'happy-hour' && CORE_SET.has(normalizeSymbol(symbol))) {
     throw new Error(`CORE_LOCK:${normalizeSymbol(symbol)}`);
   }
 }
