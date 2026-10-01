@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   RefreshControl,
   SafeAreaView,
   ScrollView,
@@ -9,6 +10,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import * as FileSystem from 'expo-file-system';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
 import { fetchSpotExecutions } from '../api/bybit';
 import { ApiCredentials, SpotExecution } from '../api/types';
 
@@ -136,11 +140,124 @@ function calculateRealizedResults(rows: SpotExecution[]): Map<string, RealizedTr
   return results;
 }
 
+function csvEscape(value: unknown): string {
+  const text = String(value ?? '');
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
+function buildCsv(rows: SpotExecution[], realized: Map<string, RealizedTradeResult>): string {
+  const header = [
+    'Czas', 'Symbol', 'Typ', 'Cena_USDT', 'Ilosc', 'Wartosc_USDT',
+    'Prowizja_waluta', 'Prowizja_USDT', 'Srednia_cena_zakupu_USDT',
+    'Koszt_zakupu_USDT', 'Sprzedaz_brutto_USDT', 'Prowizje_lacznie_USDT',
+    'Zysk_brutto_USDT', 'Zysk_netto_USDT', 'Wynik_pelny', 'Order_ID', 'Exec_ID',
+  ];
+  const lines = [header.map(csvEscape).join(';')];
+
+  for (const item of rows) {
+    const feeUsdt = getFeeUsdtEquivalent(item);
+    const tradeResult = item.side === 'Sell' ? realized.get(item.execId) : undefined;
+    lines.push([
+      formatTime(item.execTime),
+      item.symbol,
+      item.side,
+      item.execPrice,
+      item.execQty,
+      item.execValue,
+      `${item.execFee} ${item.feeCurrency || ''}`,
+      feeUsdt ?? '',
+      tradeResult?.averageBuyPrice ?? '',
+      tradeResult?.buyCostGrossUsdt ?? '',
+      tradeResult?.sellValueGrossUsdt ?? '',
+      tradeResult?.totalFeesUsdt ?? '',
+      tradeResult?.grossProfitUsdt ?? '',
+      tradeResult?.netProfitUsdt ?? '',
+      tradeResult ? (tradeResult.complete ? 'TAK' : 'NIE') : '',
+      item.orderId,
+      item.execId,
+    ].map(csvEscape).join(';'));
+  }
+
+  return '\uFEFF' + lines.join('\n');
+}
+
+function htmlEscape(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildPdfHtml(rows: SpotExecution[], realized: Map<string, RealizedTradeResult>): string {
+  const completed = Array.from(realized.values()).filter((row) => row.complete);
+  const totalNet = completed.reduce((sum, row) => sum + row.netProfitUsdt, 0);
+  const totalFees = completed.reduce((sum, row) => sum + row.totalFeesUsdt, 0);
+  const totalGross = completed.reduce((sum, row) => sum + row.grossProfitUsdt, 0);
+
+  const bodyRows = rows.map((item) => {
+    const feeUsdt = getFeeUsdtEquivalent(item);
+    const result = item.side === 'Sell' ? realized.get(item.execId) : undefined;
+    return `
+      <tr>
+        <td>${htmlEscape(formatTime(item.execTime))}</td>
+        <td>${htmlEscape(item.symbol)}</td>
+        <td>${htmlEscape(item.side)}</td>
+        <td>${htmlEscape(item.execPrice)}</td>
+        <td>${htmlEscape(item.execQty)}</td>
+        <td>${htmlEscape(item.execValue)}</td>
+        <td>${feeUsdt !== null ? formatNumber(feeUsdt, 4) : '-'}</td>
+        <td>${result ? formatNumber(result.grossProfitUsdt, 4) : '-'}</td>
+        <td>${result ? formatNumber(result.netProfitUsdt, 4) : '-'}</td>
+      </tr>`;
+  }).join('');
+
+  return `<!doctype html>
+  <html>
+    <head>
+      <meta charset="utf-8" />
+      <style>
+        body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
+        h1 { margin-bottom: 4px; }
+        .sub { color: #666; margin-bottom: 18px; }
+        .summary { margin: 14px 0 20px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
+        .positive { color: #11863b; font-weight: 700; }
+        .negative { color: #c62828; font-weight: 700; }
+        table { width: 100%; border-collapse: collapse; font-size: 9px; }
+        th, td { border: 1px solid #ddd; padding: 5px; text-align: left; }
+        th { background: #f2f2f2; }
+        .note { margin-top: 14px; color: #666; font-size: 9px; }
+      </style>
+    </head>
+    <body>
+      <h1>Bybit Trading — raport transakcji</h1>
+      <div class="sub">Wygenerowano: ${htmlEscape(new Date().toLocaleString('pl-PL'))}</div>
+      <div class="summary">
+        <div>Zamknięte, w pełni dopasowane sprzedaże: ${completed.length}</div>
+        <div>Zysk/strata brutto: <span class="${totalGross >= 0 ? 'positive' : 'negative'}">${formatNumber(totalGross, 4)} USDT</span></div>
+        <div>Prowizje łącznie: ${formatNumber(totalFees, 4)} USDT</div>
+        <div>Zysk/strata NETTO: <span class="${totalNet >= 0 ? 'positive' : 'negative'}">${formatNumber(totalNet, 4)} USDT</span></div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Czas</th><th>Symbol</th><th>Typ</th><th>Cena</th><th>Ilość</th>
+            <th>Wartość</th><th>Fee USDT</th><th>PnL brutto</th><th>PnL netto</th>
+          </tr>
+        </thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+      <div class="note">PnL sprzedaży jest liczony metodą FIFO na podstawie wykonów dostępnych w pobranej historii. Niepełne dopasowania nie są wliczane do podsumowania netto.</div>
+    </body>
+  </html>`;
+}
+
 export const ReportScreen: React.FC<Props> = ({ credentials }) => {
   const [rows, setRows] = useState<SpotExecution[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [exporting, setExporting] = useState<'csv' | 'pdf' | null>(null);
 
   const load = useCallback(async (manual = false) => {
     manual ? setRefreshing(true) : setLoading(true);
@@ -154,6 +271,38 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
       setRefreshing(false);
     }
   }, [credentials]);
+
+  const exportCsv = async () => {
+    if (rows.length === 0 || exporting) return;
+    setExporting('csv');
+    try {
+      const realized = calculateRealizedResults(rows);
+      const csv = buildCsv(rows, realized);
+      const fileUri = `${FileSystem.cacheDirectory}bybit-report-${Date.now()}.csv`;
+      await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+      if (!(await Sharing.isAvailableAsync())) throw new Error('Udostępnianie plików nie jest dostępne na tym urządzeniu.');
+      await Sharing.shareAsync(fileUri, { mimeType: 'text/csv', dialogTitle: 'Eksport raportu CSV' });
+    } catch (e: unknown) {
+      Alert.alert('Eksport CSV nieudany', e instanceof Error ? e.message : 'Nie udało się utworzyć pliku CSV.');
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  const exportPdf = async () => {
+    if (rows.length === 0 || exporting) return;
+    setExporting('pdf');
+    try {
+      const realized = calculateRealizedResults(rows);
+      const { uri } = await Print.printToFileAsync({ html: buildPdfHtml(rows, realized), base64: false });
+      if (!(await Sharing.isAvailableAsync())) throw new Error('Udostępnianie plików nie jest dostępne na tym urządzeniu.');
+      await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: 'Eksport raportu PDF' });
+    } catch (e: unknown) {
+      Alert.alert('Eksport PDF nieudany', e instanceof Error ? e.message : 'Nie udało się utworzyć pliku PDF.');
+    } finally {
+      setExporting(null);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -172,6 +321,23 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
           </View>
           <TouchableOpacity style={styles.refreshButton} onPress={() => void load(true)}>
             <Text style={styles.refreshText}>Odśwież</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.exportRow}>
+          <TouchableOpacity
+            style={[styles.exportButton, (rows.length === 0 || exporting !== null) && styles.exportDisabled]}
+            onPress={() => void exportCsv()}
+            disabled={rows.length === 0 || exporting !== null}
+          >
+            <Text style={styles.exportButtonText}>{exporting === 'csv' ? 'EKSPORT CSV...' : 'EKSPORT CSV'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.exportButton, (rows.length === 0 || exporting !== null) && styles.exportDisabled]}
+            onPress={() => void exportPdf()}
+            disabled={rows.length === 0 || exporting !== null}
+          >
+            <Text style={styles.exportButtonText}>{exporting === 'pdf' ? 'EKSPORT PDF...' : 'EKSPORT PDF'}</Text>
           </TouchableOpacity>
         </View>
 
@@ -237,6 +403,10 @@ const styles = StyleSheet.create({
   subtitle: { color: '#8E8E93', marginTop: 4 },
   refreshButton: { backgroundColor: '#242424', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10 },
   refreshText: { color: '#F0B90B', fontWeight: '700' },
+  exportRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  exportButton: { flex: 1, backgroundColor: '#F0B90B', borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
+  exportButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
+  exportDisabled: { opacity: 0.45 },
   loader: { marginTop: 30 },
   error: { color: '#FF6B6B', marginTop: 20 },
   empty: { color: '#8E8E93', marginTop: 24 },
