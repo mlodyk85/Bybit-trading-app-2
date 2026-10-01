@@ -1326,7 +1326,8 @@ export const TradeScreen: React.FC<Props> = ({
             }
 
             const freeUsdtNow = await refreshAvailableUsdt();
-            setAccumulationStatus(`SMART ACTIVE: monitoruję ${smartOwned.length} coinów • część robocza ${Math.min(10, Math.max(1, toNumber(accumulationShare) || 5)).toFixed(1)}% • fundusz dokupienia ${coreAccumulationFundRef.current.toFixed(4)} USDT • wolne USDT ${freeUsdtNow.toFixed(2)}. Sprzedaję tylko część roboczą po potwierdzonej górce i odkupuję niżej.`);
+            const actionableSmart = smartOwned.filter((item) => isCoreAccumulationSymbol(item.symbol) && !sellLockedSymbolsRef.current.includes(item.symbol.toUpperCase()));
+            setAccumulationStatus(`SMART ACTIVE: wykryto ${smartOwned.length} pozycji, aktywnie buduję ${actionableSmart.length} CORE • część robocza ${Math.min(10, Math.max(1, toNumber(accumulationShare) || 5)).toFixed(1)}% • fundusz dokupienia ${coreAccumulationFundRef.current.toFixed(4)} USDT • wolne USDT ${freeUsdtNow.toFixed(2)}.`);
             await sleep(900);
           } catch (e: unknown) {
             setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
@@ -1396,6 +1397,20 @@ export const TradeScreen: React.FC<Props> = ({
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
     if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Minimalna liczba cykli: 1–1000.');
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
+
+    const preflightFree = availableUsdt;
+    const minRequired = smartMode === 'liquid'
+      ? LIQUID_SCALP_MIN_CAPITAL_USDT
+      : smartMode === 'aggressive'
+        ? AGGRESSIVE_MIN_CAPITAL_USDT
+        : smartMode === 'spread'
+          ? SPREAD_SCALP_MIN_CAPITAL_USDT
+          : SMART_MIN_TRADE_USDT;
+    if (smartMode !== 'shadow' && preflightFree > 0 && preflightFree + 1e-8 < minRequired) {
+      setError(`Za mało wolnego USDT dla ${smartMode.toUpperCase()}: masz ${preflightFree.toFixed(2)} USDT, minimum trybu to ${minRequired.toFixed(2)} USDT.`);
+      setSmartStatus(`NIE URUCHOMIONO: wolne USDT ${preflightFree.toFixed(2)} < minimum ${minRequired.toFixed(2)} USDT. Kapitał w innych coinach nie jest automatycznie sprzedawany przez ten tryb.`);
+      return;
+    }
 
     stopRef.current = false;
     void setTradingRunRequested('happy-hour', true);
@@ -1701,7 +1716,7 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smartSub}>Oddzielny silnik • własne pozycje • nie uruchamia i nie zatrzymuje Happy Hour</Text>
             </View>
           </View>
-          <Text style={styles.smartNotice}>SMART ACTIVE buduje liczbę coinów przez obrót tylko częścią roboczą portfela. BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO: po lokalnej górce bot może sprzedać 1–10% pozycji, a następnie odkupić niżej tak, aby po opłatach zwiększyć liczbę sztuk. Pozostała część pozycji nie jest ruszana.</Text>
+          <Text style={styles.smartNotice}>SMART ACTIVE buduje BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO przez obrót częścią roboczą 1–10%. Inne coiny mogą być widoczne w portfelu, ale ten silnik ich automatycznie nie sprzedaje. Status poniżej pokazuje teraz osobno liczbę pozycji wykrytych i liczbę faktycznie aktywnych CORE.</Text>
           {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
           <Text style={styles.smallLabel}>Kapitał pierwszego/dodatkowego BUY SMART (USDT)</Text>
           <TextInput value={smartSeedCapital} onChangeText={setSmartSeedCapital} editable={!accumulationRunning} keyboardType="decimal-pad" style={styles.smallInput} />
