@@ -51,7 +51,7 @@ interface Props {
   onHoldingConsumed?: () => void;
 }
 
-type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'liquid';
+type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'liquid' | 'spread';
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -115,6 +115,10 @@ const LIQUID_SCALP_SYMBOLS = new Set(['BTCUSDT', 'XRPUSDT', 'ETHUSDT', 'SOLUSDT'
 const LIQUID_SCALP_MIN_CAPITAL_USDT = 50;
 const LIQUID_SCALP_MAX_CAPITAL_USDT = 300;
 const LIQUID_SCALP_MIN_GROSS_TARGET_PCT = 0.65;
+const SPREAD_SCALP_MIN_CAPITAL_USDT = 10;
+const SPREAD_SCALP_MAX_CAPITAL_USDT = 300;
+const SPREAD_SCALP_MAX_SPREAD_PCT = 0.08;
+const SPREAD_SCALP_MIN_GROSS_TARGET_PCT = 0.30;
 const SPOT_MAKER_FEE_PCT = 0.075;
 const SPOT_TAKER_FEE_PCT = 0.075;
 const MARKET_ROUND_TRIP_FEE_PCT = SPOT_TAKER_FEE_PCT * 2;
@@ -122,8 +126,8 @@ const SLIPPAGE_SAFETY_PCT = 0.04;
 const EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const SMART_MIN_TRADE_USDT = 5;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.15;
-const ACCUMULATION_MIN_PROFIT_PCT = 0.75;
-const ACCUMULATION_PEAK_PULLBACK_PCT = 0.18;
+const ACCUMULATION_MIN_PROFIT_PCT = 0.45;
+const ACCUMULATION_PEAK_PULLBACK_PCT = 0.10;
 const ACCUMULATION_DEFAULT_SHARE = 0.05;
 const ACCUMULATION_REBUY_DROP_PCT = 0.35;
 const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
@@ -162,6 +166,8 @@ export const TradeScreen: React.FC<Props> = ({
   const [shadowCapital, setShadowCapital] = useState('25');
   const [liquidCapital, setLiquidCapital] = useState('100');
   const [aggressiveCapital, setAggressiveCapital] = useState(String(Math.min(50, maxOrderUsdt)));
+  const [spreadCapital, setSpreadCapital] = useState(String(Math.min(25, maxOrderUsdt)));
+  const [smartSeedCapital, setSmartSeedCapital] = useState(String(Math.min(25, maxOrderUsdt)));
   const [shadowUsdt, setShadowUsdt] = useState(25);
   const [availableUsdt, setAvailableUsdt] = useState(0);
   const [sessionProfit, setSessionProfit] = useState(0);
@@ -436,9 +442,10 @@ export const TradeScreen: React.FC<Props> = ({
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
     const scanNo = scanCountRef.current + 1;
-    const scanSamples = smartMode === 'aggressive' ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
-    const scanIntervalMs = smartMode === 'aggressive' ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
-    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE BASKET' : smartMode === 'liquid' ? ' • LIQUID SCALP' : '';
+    const fastMode = smartMode === 'aggressive' || smartMode === 'spread';
+    const scanSamples = fastMode ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
+    const scanIntervalMs = fastMode ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
+    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE BASKET' : smartMode === 'liquid' ? ' • LIQUID SCALP' : smartMode === 'spread' ? ' • SPREAD SCALP' : '';
     setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${modeLabel}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
@@ -482,7 +489,23 @@ export const TradeScreen: React.FC<Props> = ({
     }
     let best: SmartCandidateScore | null = null;
 
-    if (smartMode === 'liquid') {
+    if (smartMode === 'spread') {
+      const spreadRows = adaptiveRows
+        .filter((row) => !STRATEGIC_CORE_SYMBOLS.has(row.market.symbol))
+        .filter((row) => row.market.turnover24h >= 1_000_000)
+        .filter((row) => row.market.spreadPct >= 0 && row.market.spreadPct <= SPREAD_SCALP_MAX_SPREAD_PCT)
+        .filter((row) => row.shortMomentumPct >= -0.003 && row.shortMomentumPct <= 0.12)
+        .map((row) => ({
+          ...row,
+          regime: 'RANGE' as MarketRegime,
+          strategy: 'RANGE_GRID' as EntryStrategy,
+          score: (SPREAD_SCALP_MAX_SPREAD_PCT - row.market.spreadPct) * 1000
+            + Math.log10(Math.max(1, row.market.turnover24h)) * 4
+            + Math.max(0, row.shortMomentumPct) * 120,
+        }))
+        .sort((a, b) => b.score - a.score);
+      best = spreadRows[0] || null;
+    } else if (smartMode === 'liquid') {
       // LIQUID SCALP deliberately trades BTC/XRP/ETH/SOL, which are CORE symbols.
       // The generic adaptive ranker excludes CORE, so rank these four locally instead.
       const liquidRows = adaptiveRows
@@ -608,7 +631,7 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
-    if (!candidate || stopRef.current || !['assist', 'aggressive', 'liquid'].includes(smartMode)) return;
+    if (!candidate || stopRef.current || !['assist', 'aggressive', 'liquid', 'spread'].includes(smartMode)) return;
     if (smartMode === 'liquid' && !LIQUID_SCALP_SYMBOLS.has(candidate.market.symbol)) return;
     // Standard Happy Hour does not touch CORE. LIQUID SCALP may trade a newly purchased
     // BTC/XRP/ETH/SOL lot, but the SELL quantity is limited to that exact new fill.
@@ -676,7 +699,9 @@ export const TradeScreen: React.FC<Props> = ({
           const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
           const dynamicProfitPct = smartMode === 'liquid'
             ? Math.max(LIQUID_SCALP_MIN_GROSS_TARGET_PCT, exitPolicy.takeProfitPct)
-            : exitPolicy.takeProfitPct;
+            : smartMode === 'spread'
+              ? Math.max(SPREAD_SCALP_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
+              : exitPolicy.takeProfitPct;
           const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
           const makerNetTarget = position.qty > 0
             ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
@@ -820,6 +845,99 @@ export const TradeScreen: React.FC<Props> = ({
     setAccumulationStatus(`CORE BUY ${candidate.symbol}: +${netQty.toPrecision(7)} za ${actualCost.toFixed(2)} USDT z wypracowanego zysku. Rezerwa USDT pozostaje nienaruszona.`);
     await refreshAvailableUsdt();
     return true;
+  };
+
+  const trySeedSmartPosition = async (): Promise<boolean> => {
+    if (sellBusyRef.current) return false;
+
+    const desiredBudget = toNumber(smartSeedCapital);
+    if (!Number.isFinite(desiredBudget) || desiredBudget < 5) return false;
+
+    const free = await refreshAvailableUsdt();
+    const reserve = free * CORE_USDT_RESERVE_PCT;
+    const spendable = Math.max(0, free - reserve);
+    const budget = Math.min(desiredBudget, spendable, maxOrderUsdt);
+    if (budget < 5) return false;
+
+    const tracked = new Set(livePositionsRef.current.filter((item) => item.fromPortfolio).map((item) => item.symbol));
+    const candidates: SpotMarketSnapshot[] = [];
+    for (const coreSymbol of COIN_BUILDER_SYMBOLS) {
+      if (tracked.has(coreSymbol) || accumulationRef.current.has(coreSymbol)) continue;
+      try { candidates.push(await fetchSpotMarketSnapshot(coreSymbol)); } catch { /* next */ }
+    }
+    if (candidates.length === 0) return false;
+
+    // Prefer a coin in the lower half of its daily range, but do not require a -2% crash.
+    const ranked = candidates
+      .filter((item) => item.lastPrice > 0 && item.low24h > 0 && item.high24h > item.low24h)
+      .map((item) => ({
+        item,
+        rangeLocation: (item.lastPrice - item.low24h) / (item.high24h - item.low24h),
+        bouncePct: ((item.lastPrice - item.low24h) / item.low24h) * 100,
+      }))
+      .filter((row) => row.rangeLocation <= 0.60 && row.item.change24hPct <= 1.5)
+      .sort((a, b) => (a.rangeLocation - b.rangeLocation) || (a.item.change24hPct - b.item.change24hPct));
+
+    const selected = ranked[0];
+    if (!selected) {
+      setAccumulationStatus('SMART: brak sensownego wejścia CORE w dolnej części dziennego zakresu. Skanuję dalej.');
+      return false;
+    }
+
+    // One-second confirmation avoids buying a visibly falling tick.
+    await sleep(900);
+    const confirm = await fetchSpotMarketSnapshot(selected.item.symbol);
+    const confirmAsk = confirm.ask > 0 ? confirm.ask : confirm.lastPrice;
+    if (confirmAsk <= 0 || confirmAsk < selected.item.lastPrice * 0.9985) {
+      setAccumulationStatus(`SMART ${selected.item.symbol}: cena nadal spada — odkładam BUY i skanuję dalej.`);
+      return false;
+    }
+
+    const exchangeMin = await fetchSpotMinOrderAmt(selected.item.symbol);
+    const minOrder = Math.max(5, exchangeMin * 1.02);
+    if (budget + 1e-8 < minOrder) {
+      setAccumulationStatus(`SMART: budżet ${budget.toFixed(2)} USDT jest poniżej minimum ${minOrder.toFixed(2)} USDT dla ${selected.item.symbol}.`);
+      return false;
+    }
+
+    sellBusyRef.current = true;
+    setBusy(true);
+    try {
+      const ack = await placeSpotMarketOrder(credentials, selected.item.symbol, 'Buy', budget, maxOrderUsdt);
+      const fill = await waitForSpotFill(credentials, ack.orderId);
+      const baseCoin = selected.item.symbol.replace(/USDT$/, '');
+      const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
+      const feeUsdt = (fill.feeByCurrency.USDT || 0) + (fill.feeByCurrency[baseCoin] || 0) * fill.avgPrice;
+      const cost = fill.quoteValue + feeUsdt;
+      livePositionsRef.current = [...livePositionsRef.current, {
+        id: `smart-seed-${selected.item.symbol}-${Date.now()}`,
+        symbol: selected.item.symbol,
+        qty,
+        costUsdt: cost,
+        entryPrice: fill.avgPrice,
+        peakMovePct: 0,
+        currentMovePct: 0,
+        currentPnlUsdt: 0,
+        sellReady: false,
+        fromPortfolio: true,
+      }];
+      setLivePositions([...livePositionsRef.current]);
+      setManagedHoldings((current) => current.some((item) => item.symbol === selected.item.symbol) ? current : [...current, {
+        symbol: selected.item.symbol,
+        baseQty: qty,
+        buyPrice: fill.avgPrice,
+        buyCostUsdt: cost,
+      }]);
+      setAccumulationStatus(`SMART BUY ${selected.item.symbol}: ${cost.toFixed(2)} USDT • pozycja dodana do COIN BUILDER. Teraz pracuje część robocza i mechanizm SELL → BUY BACK.`);
+      await refreshAvailableUsdt();
+      return true;
+    } catch (e: unknown) {
+      setAccumulationStatus(`SMART BUY nieudany: ${e instanceof Error ? e.message : 'błąd zlecenia'}.`);
+      return false;
+    } finally {
+      sellBusyRef.current = false;
+      setBusy(false);
+    }
   };
 
   const tryStartAccumulation = async (): Promise<boolean> => {
@@ -1099,9 +1217,7 @@ export const TradeScreen: React.FC<Props> = ({
         const portfolioSeeds = Array.from(bySymbol.values());
 
         if (portfolioSeeds.length === 0) {
-          setAccumulationStatus('SMART: brak coinów z rozpoznaną ceną zakupu. Nie sprzedaję aktywów bez kosztu bazowego.');
-          setAccumulationRunning(false);
-          return;
+          setAccumulationStatus('SMART: brak istniejących pozycji CORE — silnik pozostaje aktywny i będzie szukał pierwszego BUY z wolnego USDT.');
         }
 
         setManagedHoldings(portfolioSeeds);
@@ -1155,6 +1271,7 @@ export const TradeScreen: React.FC<Props> = ({
             // only when the expected base-coin quantity increases after fees.
             if (!accumulationStopRef.current) {
               await tryStartAccumulation();
+              await trySeedSmartPosition();
               await tryBuyStrategicDip();
             }
             for (const activeCycle of Array.from(accumulationRef.current.values())) {
@@ -1196,14 +1313,18 @@ export const TradeScreen: React.FC<Props> = ({
       ? toNumber(liquidCapital)
       : smartMode === 'aggressive'
         ? toNumber(aggressiveCapital)
-        : toNumber(amount);
+        : smartMode === 'spread'
+          ? toNumber(spreadCapital)
+          : toNumber(amount);
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
     const requestedSlots = Math.floor(toNumber(maxSlots)) || 1;
     const slots = smartMode === 'liquid'
       ? 1
-      : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 3, requestedSlots));
+      : smartMode === 'spread'
+        ? Math.max(1, Math.min(3, requestedSlots))
+        : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
 
     if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) {
@@ -1211,13 +1332,18 @@ export const TradeScreen: React.FC<Props> = ({
         ? `LIQUID SCALP: kapitał musi być <= globalnego limitu ${maxOrderUsdt} USDT. Zwiększ limit w Ustawieniach, jeśli chcesz użyć większej kwoty.`
         : smartMode === 'aggressive'
           ? `AGGRESSIVE: kapitał jednej pozycji musi być <= globalnego limitu ${maxOrderUsdt} USDT. Zwiększ limit w Ustawieniach, jeśli chcesz większe wejścia.`
-          : `Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
+          : smartMode === 'spread'
+            ? `SPREAD SCALP: kapitał jednej pozycji musi być <= globalnego limitu ${maxOrderUsdt} USDT.`
+            : `Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
     }
     if (smartMode === 'liquid' && (trade < LIQUID_SCALP_MIN_CAPITAL_USDT || trade > LIQUID_SCALP_MAX_CAPITAL_USDT)) {
       return setError(`LIQUID SCALP: ustaw kapitał ${LIQUID_SCALP_MIN_CAPITAL_USDT}–${LIQUID_SCALP_MAX_CAPITAL_USDT} USDT.`);
     }
     if (smartMode === 'aggressive' && (trade < AGGRESSIVE_MIN_CAPITAL_USDT || trade > AGGRESSIVE_MAX_CAPITAL_USDT)) {
       return setError(`AGGRESSIVE: ustaw kapitał jednej pozycji ${AGGRESSIVE_MIN_CAPITAL_USDT}–${AGGRESSIVE_MAX_CAPITAL_USDT} USDT.`);
+    }
+    if (smartMode === 'spread' && (trade < SPREAD_SCALP_MIN_CAPITAL_USDT || trade > SPREAD_SCALP_MAX_CAPITAL_USDT)) {
+      return setError(`SPREAD SCALP: ustaw kapitał jednej pozycji ${SPREAD_SCALP_MIN_CAPITAL_USDT}–${SPREAD_SCALP_MAX_CAPITAL_USDT} USDT.`);
     }
     if (trade < SMART_MIN_TRADE_USDT) return setError(`SMART AUTO i DEMO wymagają minimum ${SMART_MIN_TRADE_USDT} USDT na jedną pozycję.`);
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
@@ -1252,7 +1378,9 @@ export const TradeScreen: React.FC<Props> = ({
       ? `AGGRESSIVE BASKET • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • szybki skan • MARKET SELL tylko przy dodatnim PnL netto`
       : smartMode === 'liquid'
         ? `LIQUID SCALP • BTC/XRP/ETH/SOL • kapitał ${trade.toFixed(2)} USDT • 1 pozycja • po BUY natychmiast wystawiam GTC LIMIT SELL widoczny na Bybit`
-        : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
+        : smartMode === 'spread'
+          ? `SPREAD SCALP • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • tylko bardzo niski spread • GTC LIMIT SELL na Bybit`
+          : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
 
     if (smartMode === 'shadow') {
       shadowUsdtRef.current = virtualCapital;
@@ -1456,6 +1584,7 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('liquid'); setMaxSlots('1'); }} style={[styles.modeButton, smartMode === 'liquid' && styles.modeSelected]}><Text style={styles.modeText}>LIQUID SCALP</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('spread'); setMaxSlots('3'); }} style={[styles.modeButton, smartMode === 'spread' && styles.modeSelected]}><Text style={styles.modeText}>SPREAD</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
             {smartMode === 'aggressive' && <>
@@ -1463,6 +1592,12 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję (10–300 USDT)</Text>
               <TextInput value={aggressiveCapital} onChangeText={setAggressiveCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.capitalHint}>Maksymalna ekspozycja = kapitał × liczba slotów. Globalny limit pojedynczego zlecenia: {maxOrderUsdt.toFixed(2)} USDT.</Text>
+            </>}
+            {smartMode === 'spread' && <>
+              <Text style={styles.liquidNotice}>SPREAD SCALP: wybiera płynne pary Spot/USDT z bardzo małym spreadem (≤ {SPREAD_SCALP_MAX_SPREAD_PCT.toFixed(2)}%), otwiera maks. 3 pozycje i po BUY wystawia GTC LIMIT SELL widoczny na Bybit.</Text>
+              <Text style={styles.smallLabel}>Kapitał SPREAD na jedną pozycję (10–300 USDT)</Text>
+              <TextInput value={spreadCapital} onChangeText={setSpreadCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.capitalHint}>Target zawsze uwzględnia szacowane fee + aktualny spread + bufor. To nie gwarantuje dodatniego wykonania.</Text>
             </>}
             {smartMode === 'liquid' && <>
               <Text style={styles.liquidNotice}>LIQUID SCALP: tylko BTC/XRP/ETH/SOL. Jedna większa pozycja. Po BUY bot od razu wystawia GTC LIMIT SELL na Bybit dla dokładnie kupionej ilości.</Text>
@@ -1510,7 +1645,7 @@ export const TradeScreen: React.FC<Props> = ({
             ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
             : smartMode === 'off'
               ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : smartMode === 'spread' ? 'START SPREAD SCALP' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
@@ -1522,6 +1657,9 @@ export const TradeScreen: React.FC<Props> = ({
           </View>
           <Text style={styles.smartNotice}>SMART ACTIVE buduje liczbę coinów przez obrót tylko częścią roboczą portfela. BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO: po lokalnej górce bot może sprzedać 1–10% pozycji, a następnie odkupić niżej tak, aby po opłatach zwiększyć liczbę sztuk. Pozostała część pozycji nie jest ruszana.</Text>
           {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
+          <Text style={styles.smallLabel}>Kapitał pierwszego/dodatkowego BUY SMART (USDT)</Text>
+          <TextInput value={smartSeedCapital} onChangeText={setSmartSeedCapital} editable={!accumulationRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+          <Text style={styles.capitalHint}>SMART może teraz sam rozpocząć pozycję BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO z wolnego USDT; nie musi czekać na zysk Happy Hour.</Text>
           <Text style={styles.smallLabel}>Część robocza SMART (%) — 1–10%, domyślnie 5%</Text>
           <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
           <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Wybrane do Smart: ${managedHoldings.length || (initialHolding ? 1 : 0)}`}</Text>
