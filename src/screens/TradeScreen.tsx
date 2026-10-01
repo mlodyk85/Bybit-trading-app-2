@@ -51,7 +51,7 @@ interface Props {
   onHoldingConsumed?: () => void;
 }
 
-type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'liquid';
+type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'liquid' | 'basket';
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -111,6 +111,8 @@ const AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT = 0.28;
 const AGGRESSIVE_MAX_SLOTS = 6;
 const AGGRESSIVE_SCAN_SAMPLES = 4;
 const AGGRESSIVE_SCAN_INTERVAL_MS = 450;
+const BASKET_MAX_SLOTS = 6;
+const BASKET_DEFAULT_TARGET_USDT = 0.50;
 const LIQUID_SCALP_SYMBOLS = new Set(['BTCUSDT', 'XRPUSDT', 'ETHUSDT', 'SOLUSDT']);
 const LIQUID_SCALP_MIN_GROSS_TARGET_PCT = 0.65;
 const SPOT_MAKER_FEE_PCT = 0.075;
@@ -160,6 +162,8 @@ export const TradeScreen: React.FC<Props> = ({
   const [shadowCapital, setShadowCapital] = useState('25');
   const [liquidCapital, setLiquidCapital] = useState('100');
   const [aggressiveCapital, setAggressiveCapital] = useState(String(Math.min(50, maxOrderUsdt)));
+  const [basketCapital, setBasketCapital] = useState(String(Math.min(20, maxOrderUsdt)));
+  const [basketTarget, setBasketTarget] = useState(String(BASKET_DEFAULT_TARGET_USDT));
   const [smartSeedCapital, setSmartSeedCapital] = useState(String(Math.min(25, maxOrderUsdt)));
   const [shadowUsdt, setShadowUsdt] = useState(25);
   const [availableUsdt, setAvailableUsdt] = useState(0);
@@ -435,10 +439,10 @@ export const TradeScreen: React.FC<Props> = ({
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
     const scanNo = scanCountRef.current + 1;
-    const fastMode = smartMode === 'aggressive';
+    const fastMode = smartMode === 'aggressive' || smartMode === 'basket';
     const scanSamples = fastMode ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
     const scanIntervalMs = fastMode ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
-    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE BASKET' : smartMode === 'liquid' ? ' • LIQUID SCALP' : '';
+    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'basket' ? ' • MT5 BASKET' : smartMode === 'liquid' ? ' • LIQUID SCALP' : '';
     setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${modeLabel}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
@@ -497,7 +501,7 @@ export const TradeScreen: React.FC<Props> = ({
         }))
         .sort((a, b) => b.score - a.score);
       best = liquidRows[0] || null;
-    } else if (smartMode === 'aggressive') {
+    } else if (smartMode === 'aggressive' || smartMode === 'basket') {
       // AGGRESSIVE has its own permissive ranking instead of first passing through
       // the conservative adaptive engine. It still requires liquidity and bounded spread.
       const aggressiveRows = adaptiveRows
@@ -610,7 +614,7 @@ export const TradeScreen: React.FC<Props> = ({
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
-    if (!candidate || stopRef.current || !['assist', 'aggressive', 'liquid'].includes(smartMode)) return;
+    if (!candidate || stopRef.current || !['assist', 'aggressive', 'liquid', 'basket'].includes(smartMode)) return;
     if (smartMode === 'liquid' && !LIQUID_SCALP_SYMBOLS.has(candidate.market.symbol)) return;
     // Standard Happy Hour does not touch CORE. LIQUID SCALP may trade a newly purchased
     // BTC/XRP/ETH/SOL lot, but the SELL quantity is limited to that exact new fill.
@@ -629,9 +633,9 @@ export const TradeScreen: React.FC<Props> = ({
       const openBuyOrdersUsdt = openOrders.filter((order) => order.side === 'Buy').reduce((sum, order) => sum + (Number(order.qty) || 0) * (Number(order.price) || 0), 0);
       const reservationId = `happy-buy-${candidate.market.symbol}-${Date.now()}`;
       const active = livePositionsRef.current.filter((item) => !item.fromPortfolio).length;
-      const modeMaxSlots = smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'liquid' ? 1 : 2;
-      const reservePct = smartMode === 'aggressive' ? 10 : smartMode === 'liquid' ? 15 : 35;
-      const reserveFloor = smartMode === 'aggressive' ? 5 : 10;
+      const modeMaxSlots = smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? BASKET_MAX_SLOTS : smartMode === 'liquid' ? 1 : 2;
+      const reservePct = smartMode === 'aggressive' || smartMode === 'basket' ? 10 : smartMode === 'liquid' ? 15 : 35;
+      const reserveFloor = smartMode === 'aggressive' || smartMode === 'basket' ? 5 : 10;
       const freeAfterReserve = Math.max(0, free - Math.max(reserveFloor, free * reservePct / 100) - openBuyOrdersUsdt - coreAccumulationFundRef.current);
       const modeCanReserve = active < modeMaxSlots && trade <= freeAfterReserve + 1e-8;
       const reserved = smartMode === 'assist'
@@ -685,7 +689,7 @@ export const TradeScreen: React.FC<Props> = ({
           const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
           const dynamicProfitPct = smartMode === 'liquid'
             ? Math.max(LIQUID_SCALP_MIN_GROSS_TARGET_PCT, exitPolicy.takeProfitPct)
-            : smartMode === 'aggressive'
+            : smartMode === 'aggressive' || smartMode === 'basket'
               ? Math.max(AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
               : exitPolicy.takeProfitPct;
           const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
@@ -716,7 +720,7 @@ export const TradeScreen: React.FC<Props> = ({
             const retryPrice = retryMarket.ask > 0 ? retryMarket.ask : retryMarket.lastPrice;
             const retryTargetPct = smartMode === 'liquid'
               ? LIQUID_SCALP_MIN_GROSS_TARGET_PCT
-              : smartMode === 'aggressive'
+              : smartMode === 'aggressive' || smartMode === 'basket'
                 ? AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT
                 : AUTO_SELL_PROFIT_PCT;
             const retryTarget = retryPrice * (1 + retryTargetPct / 100);
@@ -743,7 +747,8 @@ export const TradeScreen: React.FC<Props> = ({
       setLivePositions([...livePositionsRef.current]);
       const liveModeName = smartMode === 'liquid' ? 'LIQUID SCALP'
         : smartMode === 'aggressive' ? 'AGGRESSIVE'
-          : 'HAPPY HOUR';
+          : smartMode === 'basket' ? 'MT5 BASKET'
+            : 'HAPPY HOUR';
       setSmartStatus(`${liveModeName} BUY ${trackedPosition.symbol}: ${position.costUsdt.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
@@ -752,6 +757,58 @@ export const TradeScreen: React.FC<Props> = ({
       setSmartStatus(`AUTO BUY nieudany: ${message}. Skaner działa dalej.`);
     } finally {
       if (capitalReservationId) capitalManagerRef.current.release(capitalReservationId);
+      setBusy(false);
+    }
+  };
+
+  const closeBasketAtTarget = async (positions: TrackedPosition[], targetNetUsdt: number): Promise<boolean> => {
+    if (smartMode !== 'basket' || sellBusyRef.current || positions.length === 0) return false;
+    const basketNet = positions.reduce((sum, item) => sum + item.currentPnlUsdt, 0);
+    if (!Number.isFinite(basketNet) || basketNet + 1e-8 < targetNetUsdt) return false;
+
+    sellBusyRef.current = true;
+    setBusy(true);
+    setError('');
+    setSmartStatus(`MT5 BASKET: cel koszyka +${targetNetUsdt.toFixed(2)} USDT osiągnięty (est. +${basketNet.toFixed(4)}). Zamykam cały koszyk...`);
+
+    let realizedBasket = 0;
+    const closedIds = new Set<string>();
+    try {
+      for (let position of positions) {
+        try {
+          if (position.exitOrderId) {
+            await cancelSpotOrder(credentials, position.symbol, position.exitOrderId);
+            position = { ...position, exitOrderId: undefined, targetSellPrice: undefined };
+          }
+          const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty, 'happy-hour');
+          const fill = await waitForSpotFill(credentials, ack.orderId);
+          const baseCoin = position.symbol.replace(/USDT$/, '');
+          const sellFeeUsdt = fill.feeByCurrency.USDT || 0;
+          const sellFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
+          const netProceeds = Math.max(0, fill.quoteValue - sellFeeUsdt - sellFeeBaseUsdt);
+          realizedBasket += netProceeds - position.costUsdt;
+          closedIds.add(position.id);
+        } catch (e: unknown) {
+          setError(`MT5 BASKET: nie udało się zamknąć ${position.symbol}: ${e instanceof Error ? e.message : 'błąd SELL'}`);
+        }
+      }
+
+      if (closedIds.size > 0) {
+        livePositionsRef.current = livePositionsRef.current.filter((item) => !closedIds.has(item.id));
+        setLivePositions([...livePositionsRef.current]);
+        sessionProfitRef.current += realizedBasket;
+        setSessionProfit(sessionProfitRef.current);
+        if (closedIds.size === positions.length) {
+          cycleCountRef.current += 1;
+          setCycleCount(cycleCountRef.current);
+        }
+        setSmartStatus(`MT5 BASKET CLOSED: ${closedIds.size}/${positions.length} pozycji • wynik NETTO ${realizedBasket >= 0 ? '+' : ''}${realizedBasket.toFixed(4)} USDT.`);
+        await refreshAvailableUsdt();
+        return closedIds.size === positions.length;
+      }
+      return false;
+    } finally {
+      sellBusyRef.current = false;
       setBusy(false);
     }
   };
@@ -1331,7 +1388,9 @@ export const TradeScreen: React.FC<Props> = ({
       ? toNumber(liquidCapital)
       : smartMode === 'aggressive'
         ? toNumber(aggressiveCapital)
-        : toNumber(amount);
+        : smartMode === 'basket'
+          ? toNumber(basketCapital)
+          : toNumber(amount);
     const freshFreeUsdt = smartMode === 'shadow' ? availableUsdt : await refreshAvailableUsdt();
     const effectiveCap = smartMode === 'shadow'
       ? requestedTrade
@@ -1343,8 +1402,9 @@ export const TradeScreen: React.FC<Props> = ({
     const requestedSlots = Math.floor(toNumber(maxSlots)) || 1;
     const slots = smartMode === 'liquid'
       ? 1
-      : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 3, requestedSlots));
+      : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? BASKET_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
+    const basketTargetValue = toNumber(basketTarget);
 
     if (!Number.isFinite(requestedTrade) || requestedTrade <= 0) {
       const message = 'Kapitał pozycji musi być większy od 0.';
@@ -1368,6 +1428,7 @@ export const TradeScreen: React.FC<Props> = ({
       setSmartStatus(`${smartMode.toUpperCase()}: żądano ${requestedTrade.toFixed(2)} USDT, ale limit/saldo pozwala na ${trade.toFixed(2)} USDT — uruchamiam z tą kwotą.`);
     }
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
+    if (smartMode === 'basket' && (!Number.isFinite(basketTargetValue) || basketTargetValue <= 0)) return setError('MT5 BASKET: cel koszyka musi być > 0 USDT.');
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
     if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Minimalna liczba cykli: 1–1000.');
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
@@ -1396,10 +1457,12 @@ export const TradeScreen: React.FC<Props> = ({
     setSessionProfit(0);
     setActiveScore(null);
     setScanInfo(smartMode === 'aggressive'
-      ? `AGGRESSIVE BASKET • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • szybki skan • MARKET SELL tylko przy dodatnim PnL netto`
-      : smartMode === 'liquid'
-        ? `LIQUID SCALP • BTC/XRP/ETH/SOL • kapitał ${trade.toFixed(2)} USDT • 1 pozycja • po BUY natychmiast wystawiam GTC LIMIT SELL widoczny na Bybit`
-        : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
+      ? `AGGRESSIVE • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • szybki skan`
+      : smartMode === 'basket'
+        ? `MT5 BASKET (SPOT TEST) • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • wspólny cel koszyka +${basketTargetValue.toFixed(2)} USDT NETTO`
+        : smartMode === 'liquid'
+          ? `LIQUID SCALP • BTC/XRP/ETH/SOL • kapitał ${trade.toFixed(2)} USDT • 1 pozycja • po BUY natychmiast GTC LIMIT SELL na Bybit`
+          : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
 
     if (smartMode === 'shadow') {
       shadowUsdtRef.current = virtualCapital;
@@ -1501,8 +1564,16 @@ export const TradeScreen: React.FC<Props> = ({
             livePositionsRef.current = [...smartOwned, ...refreshed];
             setLivePositions([...livePositionsRef.current]);
 
+            if (smartMode === 'basket' && refreshed.length > 0) {
+              const basketClosed = await closeBasketAtTarget(refreshed.filter((item) => !item.fromPortfolio), basketTargetValue);
+              if (basketClosed) {
+                await sleep(500);
+                continue;
+              }
+            }
+
             const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
-            if (sellCandidate) {
+            if (sellCandidate && smartMode !== 'basket') {
               await executeAssistSell(sellCandidate);
               await sleep(500);
               continue;
@@ -1603,6 +1674,7 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('liquid'); setMaxSlots('1'); }} style={[styles.modeButton, smartMode === 'liquid' && styles.modeSelected]}><Text style={styles.modeText}>LIQUID SCALP</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('basket'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'basket' && styles.modeSelected]}><Text style={styles.modeText}>MT5 BASKET</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
             {smartMode === 'aggressive' && <>
@@ -1610,6 +1682,14 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję</Text>
               <TextInput value={aggressiveCapital} onChangeText={setAggressiveCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.capitalHint}>Jeśli wpiszesz więcej niż globalny limit lub wolne saldo, tryb automatycznie użyje maksymalnej dostępnej kwoty. Globalny limit: {maxOrderUsdt.toFixed(2)} USDT.</Text>
+            </>}
+            {smartMode === 'basket' && <>
+              <Text style={styles.aggressiveNotice}>MT5 BASKET — SPOT TEST: otwiera kilka niezależnych pozycji bez dźwigni. Każdy BUY ma awaryjny GTC SELL na Bybit, ale głównym celem jest łączny wynik całego koszyka. Gdy suma est. PnL osiągnie cel, bot anuluje GTC i próbuje zamknąć cały koszyk rynkowo.</Text>
+              <Text style={styles.smallLabel}>Kapitał na jedną pozycję BASKET</Text>
+              <TextInput value={basketCapital} onChangeText={setBasketCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.smallLabel}>Cel całego koszyka NETTO (USDT)</Text>
+              <TextInput value={basketTarget} onChangeText={setBasketTarget} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.capitalHint}>To jest wariant testowy na Spot, bez leverage. Domyślny cel koszyka: +{BASKET_DEFAULT_TARGET_USDT.toFixed(2)} USDT.</Text>
             </>}
             {smartMode === 'liquid' && <>
               <Text style={styles.liquidNotice}>LIQUID SCALP: tylko BTC/XRP/ETH/SOL. Jedna większa pozycja. Po BUY bot od razu wystawia GTC LIMIT SELL na Bybit dla dokładnie kupionej ilości.</Text>
@@ -1624,7 +1704,7 @@ export const TradeScreen: React.FC<Props> = ({
             </View>
             <View style={styles.grid}>
               <View style={styles.field}><Text style={styles.smallLabel}>Min. cykli</Text><TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
-              <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty {smartMode === 'aggressive' ? '1–6' : '1–3'}</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
+              <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty {smartMode === 'aggressive' || smartMode === 'basket' ? '1–6' : '1–3'}</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
             </View>
             {smartMode === 'shadow' ? (
               <><Text style={styles.smallLabel}>Kapitał DEMO (min. 10 USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
@@ -1658,7 +1738,7 @@ export const TradeScreen: React.FC<Props> = ({
             ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
             : smartMode === 'off'
               ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START MT5 BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
