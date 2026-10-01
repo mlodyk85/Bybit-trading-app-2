@@ -511,7 +511,7 @@ export const TradeScreen: React.FC<Props> = ({
       const liquidRows = adaptiveRows
         .filter((row) => LIQUID_SCALP_SYMBOLS.has(row.market.symbol))
         .filter((row) => row.market.turnover24h >= 1_000_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.20)
-        .filter((row) => row.shortMomentumPct > 0 || (row.windowMomentumPct < 0 && row.shortMomentumPct >= -0.01))
+        .filter((row) => row.shortMomentumPct >= -0.02 || row.windowMomentumPct < -0.05)
         .map((row) => ({
           ...row,
           regime: row.shortMomentumPct > 0.03 ? 'TREND_UP' as MarketRegime : 'RANGE' as MarketRegime,
@@ -520,6 +520,24 @@ export const TradeScreen: React.FC<Props> = ({
         }))
         .sort((a, b) => b.score - a.score);
       best = liquidRows[0] || null;
+    } else if (smartMode === 'aggressive') {
+      // AGGRESSIVE has its own permissive ranking instead of first passing through
+      // the conservative adaptive engine. It still requires liquidity and bounded spread.
+      const aggressiveRows = adaptiveRows
+        .filter((row) => row.market.turnover24h >= 250_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.45)
+        .filter((row) => row.shortMomentumPct >= -0.01 || row.windowMomentumPct <= -0.02)
+        .map((row) => ({
+          ...row,
+          regime: row.shortMomentumPct > 0.015 ? 'TREND_UP' as MarketRegime : 'RANGE' as MarketRegime,
+          strategy: row.shortMomentumPct > 0.015 ? 'MOMENTUM_BREAKOUT' as EntryStrategy : 'RANGE_GRID' as EntryStrategy,
+          score:
+            Math.log10(Math.max(1, row.market.turnover24h)) * 3
+            - row.market.spreadPct * 90
+            + row.shortMomentumPct * 180
+            - Math.max(0, row.windowMomentumPct) * 10,
+        }))
+        .sort((a, b) => b.score - a.score);
+      best = aggressiveRows[0] || null;
     } else {
       const ranked = rankAdaptiveOpportunities(adaptiveRows.map((row) => ({
         symbol: row.market.symbol, change24hPct: row.market.change24hPct,
@@ -529,22 +547,6 @@ export const TradeScreen: React.FC<Props> = ({
       const winner = ranked[0];
       const source = winner ? adaptiveRows.find((row) => row.market.symbol === winner.symbol) : undefined;
       best = winner && source ? { ...source, score: winner.score, regime: winner.regime, strategy: winner.strategy } : null;
-
-      if (!best && smartMode === 'aggressive') {
-        // Aggressive mode must not sit idle just because the standard filter is too strict.
-        // Use a wider but still liquidity/spread-gated fallback on non-CORE Spot pairs.
-        const aggressiveFallback = adaptiveRows
-          .filter((row) => row.market.turnover24h >= 350_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.40)
-          .filter((row) => row.shortMomentumPct > 0 || (row.windowMomentumPct < -0.015 && row.shortMomentumPct >= -0.003))
-          .map((row) => ({
-            ...row,
-            regime: row.shortMomentumPct > 0.02 ? 'TREND_UP' as MarketRegime : 'RANGE' as MarketRegime,
-            strategy: row.shortMomentumPct > 0.02 ? 'MOMENTUM_BREAKOUT' as EntryStrategy : 'RANGE_GRID' as EntryStrategy,
-            score: row.shortMomentumPct * 260 - row.market.spreadPct * 120 + Math.log10(Math.max(1, row.market.turnover24h)) * 2,
-          }))
-          .sort((a, b) => b.score - a.score);
-        best = aggressiveFallback[0] || null;
-      }
     }
     setActiveScore(best);
     if (best) {
@@ -586,7 +588,7 @@ export const TradeScreen: React.FC<Props> = ({
         setAiAdvisorStatus('AI SHADOW: wyłączony w Ustawieniach.');
       }
     } else if (bestObserved) {
-      setScanInfo(`BRAK WEJŚCIA • ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • czekam na odbicie po spadku albo potwierdzony momentum`);
+      setScanInfo(`BRAK WEJŚCIA • tryb ${smartMode.toUpperCase()} • najlepszy obserwowany ${bestObserved.symbol} ${bestObserved.momentum >= 0 ? '+' : ''}${bestObserved.momentum.toFixed(4)}% • spread ${bestObserved.spread.toFixed(3)}%`);
     } else {
       setScanInfo('BRAK WEJŚCIA • za mało danych');
     }
@@ -650,14 +652,21 @@ export const TradeScreen: React.FC<Props> = ({
       const openBuyOrdersUsdt = openOrders.filter((order) => order.side === 'Buy').reduce((sum, order) => sum + (Number(order.qty) || 0) * (Number(order.price) || 0), 0);
       const reservationId = `happy-buy-${candidate.market.symbol}-${Date.now()}`;
       const active = livePositionsRef.current.filter((item) => !item.fromPortfolio).length;
-      const reserved = capitalManagerRef.current.tryReserve(reservationId, trade, {
-        walletFreeUsdt: free, openBuyOrdersUsdt, managedPositionsCostUsdt: livePositionsRef.current.reduce((sum, item) => sum + item.costUsdt, 0), smartReservedUsdt: coreAccumulationFundRef.current,
-      }, active);
+      const modeMaxSlots = smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'liquid' ? 1 : smartMode === 'spread' ? 3 : 2;
+      const reservePct = smartMode === 'aggressive' ? 10 : smartMode === 'liquid' ? 15 : smartMode === 'spread' ? 15 : 35;
+      const reserveFloor = smartMode === 'aggressive' ? 5 : 10;
+      const freeAfterReserve = Math.max(0, free - Math.max(reserveFloor, free * reservePct / 100) - openBuyOrdersUsdt - coreAccumulationFundRef.current);
+      const modeCanReserve = active < modeMaxSlots && trade <= freeAfterReserve + 1e-8;
+      const reserved = smartMode === 'assist'
+        ? capitalManagerRef.current.tryReserve(reservationId, trade, {
+            walletFreeUsdt: free, openBuyOrdersUsdt, managedPositionsCostUsdt: livePositionsRef.current.reduce((sum, item) => sum + item.costUsdt, 0), smartReservedUsdt: coreAccumulationFundRef.current,
+          }, active)
+        : modeCanReserve;
       if (!reserved) {
-        setSmartStatus(`CAPITAL RESERVE: brak bezpiecznego budżetu na ${trade.toFixed(2)} USDT.`);
+        setSmartStatus(`CAPITAL RESERVE: wolne ${free.toFixed(2)} USDT • po rezerwie ${freeAfterReserve.toFixed(2)} USDT • potrzebuję ${trade.toFixed(2)} USDT.`);
         return;
       }
-      capitalReservationId = reservationId;
+      if (smartMode === 'assist') capitalReservationId = reservationId;
       const rules = await fetchSpotTradingRules(candidate.market.symbol);
       const sizing = planSpotCycleSizing(free, trade, candidate.market.ask || candidate.market.lastPrice, rules);
       if (!sizing) {
@@ -668,7 +677,7 @@ export const TradeScreen: React.FC<Props> = ({
       const ack = await placeSpotMarketOrder(credentials, candidate.market.symbol, 'Buy', sizing.quoteUsdt, maxOrderUsdt);
       setLastAck(ack);
       const fill = await waitForSpotFill(credentials, ack.orderId);
-      capitalManagerRef.current.release(reservationId);
+      if (smartMode === 'assist') capitalManagerRef.current.release(reservationId);
       capitalReservationId = '';
       const baseCoin = candidate.market.symbol.replace(/USDT$/, '');
       const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
