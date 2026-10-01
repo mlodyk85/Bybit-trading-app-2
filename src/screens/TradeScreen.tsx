@@ -106,6 +106,7 @@ const AUTO_SELL_MIN_NET_PCT = 0.08;
 // AGGRESSIVE BASKET stays Spot-only but rotates capital much faster:
 // no resting GTC exit after BUY, more parallel slots and a lower positive-net exit gate.
 const AGGRESSIVE_AUTO_SELL_PROFIT_PCT = 0.16;
+const AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT = 0.28;
 const AGGRESSIVE_MAX_SLOTS = 6;
 const AGGRESSIVE_SCAN_SAMPLES = 4;
 const AGGRESSIVE_SCAN_INTERVAL_MS = 450;
@@ -696,11 +697,11 @@ export const TradeScreen: React.FC<Props> = ({
       };
 
       let trackedPosition = position;
-      let exitStatus = smartMode === 'aggressive'
-        ? 'AGGRESSIVE: bez wiszącego GTC SELL — aktywny monitoring i MARKET SELL po dodatnim wyniku netto'
-        : 'awaryjny monitoring ceny';
+      let exitStatus = 'awaryjny monitoring ceny';
 
-      if (smartMode !== 'aggressive') {
+      // Every LIVE mode protects a completed BUY with an exchange-side GTC LIMIT SELL.
+      // This keeps the exit visible on Bybit and survives app/background interruptions.
+      {
         try {
           const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
           // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
@@ -708,15 +709,18 @@ export const TradeScreen: React.FC<Props> = ({
           const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
           const dynamicProfitPct = smartMode === 'liquid'
             ? Math.max(LIQUID_SCALP_MIN_GROSS_TARGET_PCT, exitPolicy.takeProfitPct)
-            : smartMode === 'spread'
-              ? Math.max(SPREAD_SCALP_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
-              : exitPolicy.takeProfitPct;
+            : smartMode === 'aggressive'
+              ? Math.max(AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
+              : smartMode === 'spread'
+                ? Math.max(SPREAD_SCALP_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
+                : exitPolicy.takeProfitPct;
           const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
           const makerNetTarget = position.qty > 0
             ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
             : grossTarget;
           const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
-          const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice, 'happy-hour');
+          const exitOwner = smartMode === 'liquid' ? 'liquid' : 'happy-hour';
+          const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice, exitOwner);
           const protectedCost = position.qty > 0 ? position.costUsdt * (exit.normalizedQty / position.qty) : position.costUsdt;
           trackedPosition = {
             ...position,
@@ -730,13 +734,46 @@ export const TradeScreen: React.FC<Props> = ({
           };
           exitStatus = `GTC SELL @ ${priceText(exit.normalizedPrice)} pozostawiony na Bybit`;
         } catch (exitError: unknown) {
-          exitStatus = `nie udało się wystawić LIMIT SELL (${exitError instanceof Error ? exitError.message : 'błąd'}); bot monitoruje i użyje bezpiecznego wyjścia`;
+          // Retry once after refreshing market data; a BUY without an exchange-side exit
+          // must be explicit in the UI instead of silently looking protected.
+          try {
+            await sleep(700);
+            const retryMarket = await fetchSpotMarketSnapshot(position.symbol);
+            const retryPrice = retryMarket.ask > 0 ? retryMarket.ask : retryMarket.lastPrice;
+            const retryTargetPct = smartMode === 'liquid'
+              ? LIQUID_SCALP_MIN_GROSS_TARGET_PCT
+              : smartMode === 'aggressive'
+                ? AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT
+                : smartMode === 'spread'
+                  ? SPREAD_SCALP_MIN_GROSS_TARGET_PCT
+                  : AUTO_SELL_PROFIT_PCT;
+            const retryTarget = retryPrice * (1 + retryTargetPct / 100);
+            const exitOwner = smartMode === 'liquid' ? 'liquid' : 'happy-hour';
+            const retryExit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, retryTarget, exitOwner);
+            const protectedCost = position.qty > 0 ? position.costUsdt * (retryExit.normalizedQty / position.qty) : position.costUsdt;
+            trackedPosition = {
+              ...position,
+              qty: retryExit.normalizedQty,
+              costUsdt: protectedCost,
+              exitOrderId: retryExit.orderId,
+              targetSellPrice: retryExit.normalizedPrice,
+              sellReady: false,
+            };
+            exitStatus = `GTC SELL RETRY @ ${priceText(retryExit.normalizedPrice)} pozostawiony na Bybit`;
+          } catch (retryError: unknown) {
+            exitStatus = `UWAGA: BUY wykonany, ale GTC SELL NIE WYSTAWIONY (${retryError instanceof Error ? retryError.message : 'błąd'}). Pozycja jest aktywnie monitorowana.`;
+            setError(exitStatus);
+          }
         }
       }
 
       livePositionsRef.current = [...livePositionsRef.current, trackedPosition];
       setLivePositions([...livePositionsRef.current]);
-      setSmartStatus(`${smartMode === 'liquid' ? 'LIQUID SCALP' : 'HAPPY HOUR'} BUY ${trackedPosition.symbol}: ${trade.toFixed(2)} USDT • ${exitStatus}.`);
+      const liveModeName = smartMode === 'liquid' ? 'LIQUID SCALP'
+        : smartMode === 'aggressive' ? 'AGGRESSIVE'
+          : smartMode === 'spread' ? 'SPREAD'
+            : 'HAPPY HOUR';
+      setSmartStatus(`${liveModeName} BUY ${trackedPosition.symbol}: ${trade.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd BUY.';
@@ -1597,7 +1634,7 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
             {smartMode === 'aggressive' && <>
-              <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: do 6 równoległych pozycji, skan co ~0,45 s między próbkami i aktywne MARKET SELL po dodatnim wyniku netto. W przeciwieństwie do zwykłego Happy Hour używa osobnego, większego kapitału na każdą pozycję.</Text>
+              <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: do 6 równoległych pozycji, skan co ~0,45 s między próbkami. Po każdym BUY bot od razu wystawia GTC LIMIT SELL na Bybit, a aktywny monitoring może wcześniej zamknąć pozycję po dodatnim PnL netto.</Text>
               <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję (10–300 USDT)</Text>
               <TextInput value={aggressiveCapital} onChangeText={setAggressiveCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.capitalHint}>Maksymalna ekspozycja = kapitał × liczba slotów. Globalny limit pojedynczego zlecenia: {maxOrderUsdt.toFixed(2)} USDT.</Text>
