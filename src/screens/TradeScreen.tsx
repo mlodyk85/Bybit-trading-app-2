@@ -102,6 +102,7 @@ const SCAN_INTERVAL_MS = 1250;
 // Safety-first thresholds. The bot never intentionally triggers a SELL at break-even.
 const AUTO_SELL_PROFIT_PCT = 0.35;
 const AUTO_SELL_MIN_NET_USDT = 0.01;
+const LIVE_MIN_NET_PROFIT_USDT = 0.50;
 const AUTO_SELL_MIN_NET_PCT = 0.08;
 // AGGRESSIVE BASKET stays Spot-only but rotates capital much faster:
 // no resting GTC exit after BUY, more parallel slots and a lower positive-net exit gate.
@@ -678,7 +679,7 @@ export const TradeScreen: React.FC<Props> = ({
       // This keeps the exit visible on Bybit and survives app/background interruptions.
       {
         try {
-          const minNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+          const minNetProfit = Math.max(LIVE_MIN_NET_PROFIT_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
           // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
           // The floor still covers fees/slippage; the cap prevents an unrealistic distant exit.
           const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
@@ -757,7 +758,7 @@ export const TradeScreen: React.FC<Props> = ({
 
   const executeAssistSell = async (position: TrackedPosition) => {
     if (sellBusyRef.current || position.fromPortfolio) return;
-    if (!position.sellReady || !passesNetProfitGate(position.currentPnlUsdt, position.costUsdt, AUTO_SELL_MIN_NET_USDT, AUTO_SELL_MIN_NET_PCT)) return;
+    if (!position.sellReady || !passesNetProfitGate(position.currentPnlUsdt, position.costUsdt, LIVE_MIN_NET_PROFIT_USDT, AUTO_SELL_MIN_NET_PCT)) return;
 
     sellBusyRef.current = true;
     setBusy(true);
@@ -1636,7 +1637,7 @@ export const TradeScreen: React.FC<Props> = ({
               {smartMode === 'shadow' && <Text style={styles.stat}>USDT {shadowUsdt.toFixed(2)}</Text>}
             </View>
 
-            <Text style={styles.feeInfo}>Spot MNT: Maker {SPOT_MAKER_FEE_PCT.toFixed(3)}% • Taker {SPOT_TAKER_FEE_PCT.toFixed(3)}% • Market BUY+SELL ≈ {MARKET_ROUND_TRIP_FEE_PCT.toFixed(3)}% + spread/slippage. Po fill bot używa rzeczywistego execFee z Bybit.</Text>
+            <Text style={styles.feeInfo}>Spot MNT: Maker {SPOT_MAKER_FEE_PCT.toFixed(3)}% • Taker {SPOT_TAKER_FEE_PCT.toFixed(3)}% • Market BUY+SELL ≈ {MARKET_ROUND_TRIP_FEE_PCT.toFixed(3)}% + spread/slippage. Minimalny cel LIVE: +{LIVE_MIN_NET_PROFIT_USDT.toFixed(2)} USDT NETTO na zamknięty cykl. Po fill bot używa rzeczywistego execFee z Bybit.</Text>
             {!!scanInfo && <Text style={styles.scanInfo}>{scanInfo}</Text>}
             <Text style={styles.aiStatus}>{aiAdvisorStatus}</Text>
             {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
