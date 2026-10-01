@@ -43,6 +43,99 @@ function getFeeUsdtEquivalent(item: SpotExecution): number | null {
   return null;
 }
 
+interface RealizedTradeResult {
+  matchedQty: number;
+  buyCostGrossUsdt: number;
+  sellValueGrossUsdt: number;
+  buyFeesUsdt: number;
+  sellFeeUsdt: number;
+  totalFeesUsdt: number;
+  grossProfitUsdt: number;
+  netProfitUsdt: number;
+  averageBuyPrice: number;
+  complete: boolean;
+}
+
+function calculateRealizedResults(rows: SpotExecution[]): Map<string, RealizedTradeResult> {
+  type Lot = { qty: number; grossCostUsdt: number; feeUsdt: number; price: number };
+  const lotsBySymbol = new Map<string, Lot[]>();
+  const results = new Map<string, RealizedTradeResult>();
+
+  const chronological = [...rows].sort((a, b) => Number(a.execTime) - Number(b.execTime));
+
+  for (const item of chronological) {
+    const symbol = item.symbol.toUpperCase();
+    const qty = Number(item.execQty);
+    const value = Number(item.execValue);
+    const price = Number(item.execPrice);
+    if (![qty, value, price].every(Number.isFinite) || qty <= 0 || value <= 0) continue;
+
+    const feeUsdt = getFeeUsdtEquivalent(item) ?? 0;
+    const baseCoin = symbol.endsWith('USDT') ? symbol.slice(0, -4) : '';
+    const feeCurrency = item.feeCurrency?.toUpperCase();
+    const baseFeeQty = feeCurrency === baseCoin ? Number(item.execFee) || 0 : 0;
+
+    if (item.side === 'Buy') {
+      const netQty = Math.max(0, qty - baseFeeQty);
+      if (netQty <= 0) continue;
+      const lots = lotsBySymbol.get(symbol) || [];
+      lots.push({ qty: netQty, grossCostUsdt: value, feeUsdt, price });
+      lotsBySymbol.set(symbol, lots);
+      continue;
+    }
+
+    if (item.side !== 'Sell') continue;
+
+    let remaining = qty;
+    let matchedQty = 0;
+    let buyCostGrossUsdt = 0;
+    let buyFeesUsdt = 0;
+    let weightedBuyPrice = 0;
+    const lots = lotsBySymbol.get(symbol) || [];
+
+    while (remaining > 1e-12 && lots.length > 0) {
+      const lot = lots[0];
+      const take = Math.min(remaining, lot.qty);
+      const fraction = lot.qty > 0 ? take / lot.qty : 0;
+      matchedQty += take;
+      buyCostGrossUsdt += lot.grossCostUsdt * fraction;
+      buyFeesUsdt += lot.feeUsdt * fraction;
+      weightedBuyPrice += lot.price * take;
+
+      lot.qty -= take;
+      lot.grossCostUsdt *= Math.max(0, 1 - fraction);
+      lot.feeUsdt *= Math.max(0, 1 - fraction);
+      remaining -= take;
+      if (lot.qty <= 1e-12) lots.shift();
+    }
+
+    lotsBySymbol.set(symbol, lots);
+
+    const complete = matchedQty + 1e-10 >= qty;
+    const sellFraction = qty > 0 ? matchedQty / qty : 0;
+    const sellValueGrossUsdt = value * sellFraction;
+    const sellFeeUsdt = feeUsdt * sellFraction;
+    const totalFeesUsdt = buyFeesUsdt + sellFeeUsdt;
+    const grossProfitUsdt = sellValueGrossUsdt - buyCostGrossUsdt;
+    const netProfitUsdt = grossProfitUsdt - totalFeesUsdt;
+
+    results.set(item.execId, {
+      matchedQty,
+      buyCostGrossUsdt,
+      sellValueGrossUsdt,
+      buyFeesUsdt,
+      sellFeeUsdt,
+      totalFeesUsdt,
+      grossProfitUsdt,
+      netProfitUsdt,
+      averageBuyPrice: matchedQty > 0 ? weightedBuyPrice / matchedQty : 0,
+      complete,
+    });
+  }
+
+  return results;
+}
+
 export const ReportScreen: React.FC<Props> = ({ credentials }) => {
   const [rows, setRows] = useState<SpotExecution[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,7 +146,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
     manual ? setRefreshing(true) : setLoading(true);
     setError('');
     try {
-      setRows(await fetchSpotExecutions(credentials, 50));
+      setRows(await fetchSpotExecutions(credentials, 100));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Nie udało się pobrać raportu.');
     } finally {
@@ -86,10 +179,13 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
         {!!error && <Text style={styles.error}>{error}</Text>}
         {!loading && !error && rows.length === 0 && <Text style={styles.empty}>Brak wykonanych transakcji Spot.</Text>}
 
-        {rows.map((item) => {
+        {(() => {
+          const realized = calculateRealizedResults(rows);
+          return rows.map((item) => {
           const isBuy = item.side === 'Buy';
           const feeCurrency = item.feeCurrency || 'waluta prowizji';
           const feeUsdt = getFeeUsdtEquivalent(item);
+          const tradeResult = !isBuy ? realized.get(item.execId) : undefined;
           return (
             <View key={`${item.execId}-${item.orderId}`} style={styles.card}>
               <View style={styles.cardTop}>
@@ -105,10 +201,29 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
                 {feeUsdt !== null ? ` ≈ ${formatNumber(feeUsdt, 4)} USDT` : ''}
               </Text>
               {!!item.feeRate && <Text style={styles.line}>Fee rate: {item.feeRate}</Text>}
+              {tradeResult && tradeResult.matchedQty > 0 && (
+                <View style={styles.pnlBox}>
+                  <Text style={styles.pnlTitle}>Wynik tej sprzedaży</Text>
+                  <Text style={styles.pnlLine}>Śr. cena zakupu: {formatNumber(tradeResult.averageBuyPrice, 8)} USDT</Text>
+                  <Text style={styles.pnlLine}>Koszt zakupu dopasowanej ilości: {formatNumber(tradeResult.buyCostGrossUsdt, 4)} USDT</Text>
+                  <Text style={styles.pnlLine}>Wartość sprzedaży brutto: {formatNumber(tradeResult.sellValueGrossUsdt, 4)} USDT</Text>
+                  <Text style={styles.pnlLine}>Prowizja BUY: {formatNumber(tradeResult.buyFeesUsdt, 4)} USDT</Text>
+                  <Text style={styles.pnlLine}>Prowizja SELL: {formatNumber(tradeResult.sellFeeUsdt, 4)} USDT</Text>
+                  <Text style={styles.pnlLine}>Prowizje łącznie: {formatNumber(tradeResult.totalFeesUsdt, 4)} USDT</Text>
+                  <Text style={[styles.pnlValue, tradeResult.grossProfitUsdt >= 0 ? styles.profit : styles.loss]}>
+                    Zysk/strata brutto: {tradeResult.grossProfitUsdt >= 0 ? '+' : ''}{formatNumber(tradeResult.grossProfitUsdt, 4)} USDT
+                  </Text>
+                  <Text style={[styles.pnlValue, tradeResult.netProfitUsdt >= 0 ? styles.profit : styles.loss]}>
+                    Zysk/strata NETTO po prowizjach: {tradeResult.netProfitUsdt >= 0 ? '+' : ''}{formatNumber(tradeResult.netProfitUsdt, 4)} USDT
+                  </Text>
+                  {!tradeResult.complete && <Text style={styles.pnlWarning}>Wynik częściowy — w pobranej historii brakuje wcześniejszego BUY dla części tej sprzedaży.</Text>}
+                </View>
+              )}
               <Text style={styles.orderId}>Order ID: {item.orderId}</Text>
             </View>
           );
-        })}
+          )});
+        })()}
       </ScrollView>
     </SafeAreaView>
   );
@@ -132,5 +247,12 @@ const styles = StyleSheet.create({
   buy: { color: '#22C55E' },
   sell: { color: '#EF4444' },
   line: { color: '#D4D4D8', marginTop: 4 },
+  pnlBox: { backgroundColor: '#151515', borderWidth: 1, borderColor: '#333333', borderRadius: 10, padding: 10, marginTop: 10 },
+  pnlTitle: { color: '#F0B90B', fontSize: 12, fontWeight: '800', marginBottom: 5 },
+  pnlLine: { color: '#C9C9CD', fontSize: 11, marginTop: 3 },
+  pnlValue: { fontSize: 12, fontWeight: '900', marginTop: 5 },
+  profit: { color: '#22C55E' },
+  loss: { color: '#EF4444' },
+  pnlWarning: { color: '#FFB74D', fontSize: 10, lineHeight: 14, marginTop: 6 },
   orderId: { color: '#76767A', fontSize: 11, marginTop: 8 },
 });
