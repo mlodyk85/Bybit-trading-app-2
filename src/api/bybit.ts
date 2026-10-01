@@ -506,6 +506,56 @@ export async function fetchSpotExecutions(credentials: ApiCredentials, limit = 5
   return result?.list || [];
 }
 
+export async function fetchSpotExecutionsHistory(
+  credentials: ApiCredentials,
+  startTime: number,
+  endTime: number,
+  maxRows = 5000
+): Promise<SpotExecution[]> {
+  const safeStart = Math.max(0, Math.floor(startTime));
+  const safeEnd = Math.max(safeStart + 1, Math.floor(endTime));
+  const cappedRows = Math.max(100, Math.min(20000, Math.floor(maxRows)));
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  const rows = new Map<string, SpotExecution>();
+
+  // Bybit execution history is queried in bounded windows. Each window is fully
+  // paginated with nextPageCursor, so the report is not limited to the newest 100 rows.
+  for (let windowEnd = safeEnd; windowEnd > safeStart && rows.size < cappedRows; ) {
+    const windowStart = Math.max(safeStart, windowEnd - sevenDaysMs + 1);
+    let cursor = '';
+    let page = 0;
+
+    do {
+      const result = await bybitGet<ExecutionListResult>(
+        '/v5/execution/list',
+        {
+          category: 'spot',
+          startTime: windowStart,
+          endTime: windowEnd,
+          limit: 100,
+          cursor: cursor || undefined,
+        },
+        credentials
+      );
+
+      for (const item of result?.list || []) {
+        if (item.execId) rows.set(item.execId, item);
+        if (rows.size >= cappedRows) break;
+      }
+
+      cursor = result?.nextPageCursor || '';
+      page += 1;
+      if (page >= 250) break;
+    } while (cursor && rows.size < cappedRows);
+
+    windowEnd = windowStart - 1;
+  }
+
+  return Array.from(rows.values())
+    .sort((a, b) => Number(b.execTime) - Number(a.execTime))
+    .slice(0, cappedRows);
+}
+
 export async function fetchSpotOrderExecutions(credentials: ApiCredentials, orderId: string): Promise<SpotExecution[]> {
   const result = await bybitGet<ExecutionListResult>('/v5/execution/list', { category: 'spot', orderId, limit: 100 }, credentials);
   return result?.list || [];
