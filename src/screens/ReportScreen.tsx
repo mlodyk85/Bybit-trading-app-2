@@ -222,7 +222,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
               <Text style={styles.orderId}>Order ID: {item.orderId}</Text>
             </View>
           );
-          )});
+        });
         })()}
       </ScrollView>
     </SafeAreaView>
