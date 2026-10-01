@@ -105,10 +105,12 @@ const AUTO_SELL_MIN_NET_USDT = 0.01;
 const AUTO_SELL_MIN_NET_PCT = 0.08;
 // AGGRESSIVE BASKET stays Spot-only but rotates capital much faster:
 // no resting GTC exit after BUY, more parallel slots and a lower positive-net exit gate.
-const AGGRESSIVE_AUTO_SELL_PROFIT_PCT = 0.18;
+const AGGRESSIVE_AUTO_SELL_PROFIT_PCT = 0.16;
 const AGGRESSIVE_MAX_SLOTS = 6;
-const AGGRESSIVE_SCAN_SAMPLES = 5;
-const AGGRESSIVE_SCAN_INTERVAL_MS = 650;
+const AGGRESSIVE_SCAN_SAMPLES = 4;
+const AGGRESSIVE_SCAN_INTERVAL_MS = 450;
+const AGGRESSIVE_MIN_CAPITAL_USDT = 10;
+const AGGRESSIVE_MAX_CAPITAL_USDT = 300;
 const LIQUID_SCALP_SYMBOLS = new Set(['BTCUSDT', 'XRPUSDT', 'ETHUSDT', 'SOLUSDT']);
 const LIQUID_SCALP_MIN_CAPITAL_USDT = 50;
 const LIQUID_SCALP_MAX_CAPITAL_USDT = 300;
@@ -159,6 +161,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [maxSlots, setMaxSlots] = useState('2');
   const [shadowCapital, setShadowCapital] = useState('25');
   const [liquidCapital, setLiquidCapital] = useState('100');
+  const [aggressiveCapital, setAggressiveCapital] = useState(String(Math.min(50, maxOrderUsdt)));
   const [shadowUsdt, setShadowUsdt] = useState(25);
   const [availableUsdt, setAvailableUsdt] = useState(0);
   const [sessionProfit, setSessionProfit] = useState(0);
@@ -508,8 +511,8 @@ export const TradeScreen: React.FC<Props> = ({
         // Aggressive mode must not sit idle just because the standard filter is too strict.
         // Use a wider but still liquidity/spread-gated fallback on non-CORE Spot pairs.
         const aggressiveFallback = adaptiveRows
-          .filter((row) => row.market.turnover24h >= 500_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.35)
-          .filter((row) => row.shortMomentumPct > 0.005 || (row.windowMomentumPct < -0.02 && row.shortMomentumPct > -0.005))
+          .filter((row) => row.market.turnover24h >= 350_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.40)
+          .filter((row) => row.shortMomentumPct > 0 || (row.windowMomentumPct < -0.015 && row.shortMomentumPct >= -0.003))
           .map((row) => ({
             ...row,
             regime: row.shortMomentumPct > 0.02 ? 'TREND_UP' as MarketRegime : 'RANGE' as MarketRegime,
@@ -1189,7 +1192,11 @@ export const TradeScreen: React.FC<Props> = ({
   const startSmart = (restored = false) => {
     if (smartRunningRef.current) return;
     if (smartMode === 'off') return setError('HAPPY HOUR jest wyłączony. Wybierz tryb handlu.');
-    const trade = smartMode === 'liquid' ? toNumber(liquidCapital) : toNumber(amount);
+    const trade = smartMode === 'liquid'
+      ? toNumber(liquidCapital)
+      : smartMode === 'aggressive'
+        ? toNumber(aggressiveCapital)
+        : toNumber(amount);
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
@@ -1202,10 +1209,15 @@ export const TradeScreen: React.FC<Props> = ({
     if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) {
       return setError(smartMode === 'liquid'
         ? `LIQUID SCALP: kapitał musi być <= globalnego limitu ${maxOrderUsdt} USDT. Zwiększ limit w Ustawieniach, jeśli chcesz użyć większej kwoty.`
-        : `Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
+        : smartMode === 'aggressive'
+          ? `AGGRESSIVE: kapitał jednej pozycji musi być <= globalnego limitu ${maxOrderUsdt} USDT. Zwiększ limit w Ustawieniach, jeśli chcesz większe wejścia.`
+          : `Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
     }
     if (smartMode === 'liquid' && (trade < LIQUID_SCALP_MIN_CAPITAL_USDT || trade > LIQUID_SCALP_MAX_CAPITAL_USDT)) {
       return setError(`LIQUID SCALP: ustaw kapitał ${LIQUID_SCALP_MIN_CAPITAL_USDT}–${LIQUID_SCALP_MAX_CAPITAL_USDT} USDT.`);
+    }
+    if (smartMode === 'aggressive' && (trade < AGGRESSIVE_MIN_CAPITAL_USDT || trade > AGGRESSIVE_MAX_CAPITAL_USDT)) {
+      return setError(`AGGRESSIVE: ustaw kapitał jednej pozycji ${AGGRESSIVE_MIN_CAPITAL_USDT}–${AGGRESSIVE_MAX_CAPITAL_USDT} USDT.`);
     }
     if (trade < SMART_MIN_TRADE_USDT) return setError(`SMART AUTO i DEMO wymagają minimum ${SMART_MIN_TRADE_USDT} USDT na jedną pozycję.`);
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
@@ -1237,7 +1249,7 @@ export const TradeScreen: React.FC<Props> = ({
     setSessionProfit(0);
     setActiveScore(null);
     setScanInfo(smartMode === 'aggressive'
-      ? `AGGRESSIVE BASKET • do ${slots} równoległych pozycji • szybki skan • bez GTC SELL • MARKET SELL dopiero po dodatnim wyniku netto`
+      ? `AGGRESSIVE BASKET • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • szybki skan • MARKET SELL tylko przy dodatnim PnL netto`
       : smartMode === 'liquid'
         ? `LIQUID SCALP • BTC/XRP/ETH/SOL • kapitał ${trade.toFixed(2)} USDT • 1 pozycja • po BUY natychmiast wystawiam GTC LIMIT SELL widoczny na Bybit`
         : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
@@ -1446,7 +1458,12 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
-            {smartMode === 'aggressive' && <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: Spot/USDT, do 6 równoległych pozycji, szybszy skan i aktywne wyjście po dodatnim PnL netto. Ten tryb nie wystawia nowych długoterminowych GTC SELL.</Text>}
+            {smartMode === 'aggressive' && <>
+              <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: do 6 równoległych pozycji, skan co ~0,45 s między próbkami i aktywne MARKET SELL po dodatnim wyniku netto. W przeciwieństwie do zwykłego Happy Hour używa osobnego, większego kapitału na każdą pozycję.</Text>
+              <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję (10–300 USDT)</Text>
+              <TextInput value={aggressiveCapital} onChangeText={setAggressiveCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.capitalHint}>Maksymalna ekspozycja = kapitał × liczba slotów. Globalny limit pojedynczego zlecenia: {maxOrderUsdt.toFixed(2)} USDT.</Text>
+            </>}
             {smartMode === 'liquid' && <>
               <Text style={styles.liquidNotice}>LIQUID SCALP: tylko BTC/XRP/ETH/SOL. Jedna większa pozycja. Po BUY bot od razu wystawia GTC LIMIT SELL na Bybit dla dokładnie kupionej ilości.</Text>
               <Text style={styles.smallLabel}>Kapitał LIQUID SCALP (50–300 USDT)</Text>
