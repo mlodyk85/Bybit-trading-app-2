@@ -1353,16 +1353,21 @@ export const TradeScreen: React.FC<Props> = ({
     setAccumulationStatus('SMART: zatrzymuję własny silnik ręcznie...');
   };
 
-  const startSmart = (restored = false) => {
+  const startSmart = async (restored = false) => {
     if (smartRunningRef.current) return;
     if (smartMode === 'off') return setError('HAPPY HOUR jest wyłączony. Wybierz tryb handlu.');
-    const trade = smartMode === 'liquid'
+    const requestedTrade = smartMode === 'liquid'
       ? toNumber(liquidCapital)
       : smartMode === 'aggressive'
         ? toNumber(aggressiveCapital)
         : smartMode === 'spread'
           ? toNumber(spreadCapital)
           : toNumber(amount);
+    const freshFreeUsdt = smartMode === 'shadow' ? availableUsdt : await refreshAvailableUsdt();
+    const effectiveCap = smartMode === 'shadow'
+      ? requestedTrade
+      : Math.min(requestedTrade, maxOrderUsdt, Math.max(0, freshFreeUsdt));
+    const trade = effectiveCap;
     const target = toNumber(targetProfit);
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
@@ -1374,43 +1379,31 @@ export const TradeScreen: React.FC<Props> = ({
         : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
 
-    if (!Number.isFinite(trade) || trade <= 0 || trade > maxOrderUsdt) {
-      return setError(smartMode === 'liquid'
-        ? `LIQUID SCALP: kapitał musi być <= globalnego limitu ${maxOrderUsdt} USDT. Zwiększ limit w Ustawieniach, jeśli chcesz użyć większej kwoty.`
-        : smartMode === 'aggressive'
-          ? `AGGRESSIVE: kapitał jednej pozycji musi być <= globalnego limitu ${maxOrderUsdt} USDT. Zwiększ limit w Ustawieniach, jeśli chcesz większe wejścia.`
-          : smartMode === 'spread'
-            ? `SPREAD SCALP: kapitał jednej pozycji musi być <= globalnego limitu ${maxOrderUsdt} USDT.`
-            : `Kwota musi być > 0 i <= ${maxOrderUsdt} USDT.`);
+    if (!Number.isFinite(requestedTrade) || requestedTrade <= 0) {
+      const message = 'Kapitał pozycji musi być większy od 0.';
+      setError(message);
+      setSmartStatus(message);
+      return;
     }
-    if (smartMode === 'liquid' && (trade < LIQUID_SCALP_MIN_CAPITAL_USDT || trade > LIQUID_SCALP_MAX_CAPITAL_USDT)) {
-      return setError(`LIQUID SCALP: ustaw kapitał ${LIQUID_SCALP_MIN_CAPITAL_USDT}–${LIQUID_SCALP_MAX_CAPITAL_USDT} USDT.`);
+    if (smartMode !== 'shadow' && freshFreeUsdt < SMART_MIN_TRADE_USDT) {
+      const message = `Za mało wolnego USDT: ${freshFreeUsdt.toFixed(2)} USDT. Minimum wykonania to ${SMART_MIN_TRADE_USDT.toFixed(2)} USDT.`;
+      setError(message);
+      setSmartStatus(`NIE URUCHOMIONO: ${message}`);
+      return;
     }
-    if (smartMode === 'aggressive' && (trade < AGGRESSIVE_MIN_CAPITAL_USDT || trade > AGGRESSIVE_MAX_CAPITAL_USDT)) {
-      return setError(`AGGRESSIVE: ustaw kapitał jednej pozycji ${AGGRESSIVE_MIN_CAPITAL_USDT}–${AGGRESSIVE_MAX_CAPITAL_USDT} USDT.`);
+    if (trade < SMART_MIN_TRADE_USDT) {
+      const message = `Efektywny kapitał po limitach to ${trade.toFixed(2)} USDT. Minimum wykonania to ${SMART_MIN_TRADE_USDT.toFixed(2)} USDT.`;
+      setError(message);
+      setSmartStatus(`NIE URUCHOMIONO: ${message}`);
+      return;
     }
-    if (smartMode === 'spread' && (trade < SPREAD_SCALP_MIN_CAPITAL_USDT || trade > SPREAD_SCALP_MAX_CAPITAL_USDT)) {
-      return setError(`SPREAD SCALP: ustaw kapitał jednej pozycji ${SPREAD_SCALP_MIN_CAPITAL_USDT}–${SPREAD_SCALP_MAX_CAPITAL_USDT} USDT.`);
+    if (smartMode !== 'shadow' && requestedTrade > trade + 1e-8) {
+      setSmartStatus(`${smartMode.toUpperCase()}: żądano ${requestedTrade.toFixed(2)} USDT, ale limit/saldo pozwala na ${trade.toFixed(2)} USDT — uruchamiam z tą kwotą.`);
     }
-    if (trade < SMART_MIN_TRADE_USDT) return setError(`SMART AUTO i DEMO wymagają minimum ${SMART_MIN_TRADE_USDT} USDT na jedną pozycję.`);
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
     if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Minimalna liczba cykli: 1–1000.');
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
-
-    const preflightFree = availableUsdt;
-    const minRequired = smartMode === 'liquid'
-      ? LIQUID_SCALP_MIN_CAPITAL_USDT
-      : smartMode === 'aggressive'
-        ? AGGRESSIVE_MIN_CAPITAL_USDT
-        : smartMode === 'spread'
-          ? SPREAD_SCALP_MIN_CAPITAL_USDT
-          : SMART_MIN_TRADE_USDT;
-    if (smartMode !== 'shadow' && preflightFree > 0 && preflightFree + 1e-8 < minRequired) {
-      setError(`Za mało wolnego USDT dla ${smartMode.toUpperCase()}: masz ${preflightFree.toFixed(2)} USDT, minimum trybu to ${minRequired.toFixed(2)} USDT.`);
-      setSmartStatus(`NIE URUCHOMIONO: wolne USDT ${preflightFree.toFixed(2)} < minimum ${minRequired.toFixed(2)} USDT. Kapitał w innych coinach nie jest automatycznie sprzedawany przez ten tryb.`);
-      return;
-    }
 
     stopRef.current = false;
     void setTradingRunRequested('happy-hour', true);
@@ -1650,21 +1643,21 @@ export const TradeScreen: React.FC<Props> = ({
             </View>
             {smartMode === 'aggressive' && <>
               <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: do 6 równoległych pozycji, skan co ~0,45 s między próbkami. Po każdym BUY bot od razu wystawia GTC LIMIT SELL na Bybit, a aktywny monitoring może wcześniej zamknąć pozycję po dodatnim PnL netto.</Text>
-              <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję (10–300 USDT)</Text>
+              <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję</Text>
               <TextInput value={aggressiveCapital} onChangeText={setAggressiveCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.capitalHint}>Maksymalna ekspozycja = kapitał × liczba slotów. Globalny limit pojedynczego zlecenia: {maxOrderUsdt.toFixed(2)} USDT.</Text>
+              <Text style={styles.capitalHint}>Jeśli wpiszesz więcej niż globalny limit lub wolne saldo, tryb automatycznie użyje maksymalnej dostępnej kwoty. Globalny limit: {maxOrderUsdt.toFixed(2)} USDT.</Text>
             </>}
             {smartMode === 'spread' && <>
               <Text style={styles.liquidNotice}>SPREAD SCALP: wybiera płynne pary Spot/USDT z bardzo małym spreadem (≤ {SPREAD_SCALP_MAX_SPREAD_PCT.toFixed(2)}%), otwiera maks. 3 pozycje i po BUY wystawia GTC LIMIT SELL widoczny na Bybit.</Text>
-              <Text style={styles.smallLabel}>Kapitał SPREAD na jedną pozycję (10–300 USDT)</Text>
+              <Text style={styles.smallLabel}>Kapitał SPREAD na jedną pozycję</Text>
               <TextInput value={spreadCapital} onChangeText={setSpreadCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.capitalHint}>Target zawsze uwzględnia szacowane fee + aktualny spread + bufor. To nie gwarantuje dodatniego wykonania.</Text>
             </>}
             {smartMode === 'liquid' && <>
               <Text style={styles.liquidNotice}>LIQUID SCALP: tylko BTC/XRP/ETH/SOL. Jedna większa pozycja. Po BUY bot od razu wystawia GTC LIMIT SELL na Bybit dla dokładnie kupionej ilości.</Text>
-              <Text style={styles.smallLabel}>Kapitał LIQUID SCALP (50–300 USDT)</Text>
+              <Text style={styles.smallLabel}>Kapitał LIQUID SCALP</Text>
               <TextInput value={liquidCapital} onChangeText={setLiquidCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.capitalHint}>Globalny limit pojedynczej transakcji: {maxOrderUsdt.toFixed(2)} USDT. Kapitał LIQUID SCALP nie może go przekroczyć.</Text>
+              <Text style={styles.capitalHint}>LIQUID automatycznie ograniczy wejście do globalnego limitu i wolnego salda. Globalny limit: {maxOrderUsdt.toFixed(2)} USDT.</Text>
             </>}
 
             <View style={styles.grid}>
@@ -1701,12 +1694,13 @@ export const TradeScreen: React.FC<Props> = ({
               </View></View>;
             })}
 
+          {!!error && <Text style={styles.inlineStartError}>{error}</Text>}
           {smartRunning && <Text style={styles.runningHint}>Aby zmienić tryb, najpierw zatrzymaj aktualnie pracujący silnik.</Text>}
           {smartRunning
             ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
             : smartMode === 'off'
               ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => startSmart(false)}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : smartMode === 'spread' ? 'START SPREAD SCALP' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE BASKET' : smartMode === 'spread' ? 'START SPREAD SCALP' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
@@ -1782,6 +1776,7 @@ const styles = StyleSheet.create({
   smartSub: { color: '#8E8E93', fontSize: 10, marginTop: 3, paddingRight: 8 },
   modeStatus: { color: '#F0B90B', fontSize: 10, fontWeight: '900', marginLeft: 8 },
   runningHint: { color: '#FFB74D', fontSize: 11, lineHeight: 16, marginBottom: 8 },
+  inlineStartError: { color: '#FF6B6B', fontSize: 11, lineHeight: 16, marginBottom: 8, fontWeight: '800' },
   smartNotice: { color: '#D4D4D8', fontSize: 12, lineHeight: 17, marginVertical: 12 },
   aggressiveNotice: { color: '#FBBF24', fontSize: 11, lineHeight: 16, marginBottom: 10, backgroundColor: '#2A220E', borderWidth: 1, borderColor: '#92400E', borderRadius: 8, padding: 9 },
   liquidNotice: { color: '#67E8F9', fontSize: 11, lineHeight: 16, marginBottom: 8, backgroundColor: '#0C2730', borderWidth: 1, borderColor: '#155E75', borderRadius: 8, padding: 9 },
