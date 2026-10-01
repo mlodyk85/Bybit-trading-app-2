@@ -252,6 +252,55 @@ function buildPdfHtml(rows: SpotExecution[], realized: Map<string, RealizedTrade
   </html>`;
 }
 
+
+interface ProfitWindowSummary {
+  label: string;
+  ms: number;
+  net: number;
+  gross: number;
+  fees: number;
+  cycles: number;
+}
+
+function buildProfitWindowSummaries(
+  rows: SpotExecution[],
+  realized: Map<string, RealizedTradeResult>,
+  now = Date.now()
+): ProfitWindowSummary[] {
+  const windows = [
+    { label: '1H', ms: 60 * 60 * 1000 },
+    { label: '12H', ms: 12 * 60 * 60 * 1000 },
+    { label: '24H', ms: 24 * 60 * 60 * 1000 },
+    { label: '7D', ms: 7 * 24 * 60 * 60 * 1000 },
+    { label: '1M', ms: 30 * 24 * 60 * 60 * 1000 },
+    { label: '3M', ms: 90 * 24 * 60 * 60 * 1000 },
+    { label: '6M', ms: 180 * 24 * 60 * 60 * 1000 },
+    { label: '12M', ms: 365 * 24 * 60 * 60 * 1000 },
+  ];
+
+  return windows.map((window) => {
+    let net = 0;
+    let gross = 0;
+    let fees = 0;
+    let cycles = 0;
+    const cutoff = now - window.ms;
+
+    for (const item of rows) {
+      if (item.side !== 'Sell') continue;
+      const execTime = Number(item.execTime);
+      if (!Number.isFinite(execTime) || execTime < cutoff || execTime > now) continue;
+      const result = realized.get(item.execId);
+      if (!result || !result.complete) continue;
+      net += result.netProfitUsdt;
+      gross += result.grossProfitUsdt;
+      fees += result.totalFeesUsdt;
+      cycles += 1;
+    }
+
+    return { ...window, net, gross, fees, cycles };
+  });
+}
+
 type ReportRange = '24h' | '7d' | '30d' | '365d';
 
 const RANGE_MS: Record<ReportRange, number> = {
@@ -353,6 +402,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
 
         {(() => {
           const realized = calculateRealizedResults(rows);
+          const profitWindows = buildProfitWindowSummaries(rows, realized);
           const completed = Array.from(realized.values()).filter((item) => item.complete);
           const totalGross = completed.reduce((sum, item) => sum + item.grossProfitUsdt, 0);
           const totalFees = completed.reduce((sum, item) => sum + item.totalFeesUsdt, 0);
@@ -375,6 +425,22 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
                 PnL NETTO: {totalNet >= 0 ? '+' : ''}{formatNumber(totalNet, 4)} USDT
               </Text>
               <Text style={styles.summaryNote}>Wczytano {rows.length} wykonań. MAX = do 365 dni historii dostępnej przez API.</Text>
+
+              <View style={styles.periodSection}>
+                <Text style={styles.periodTitle}>Zysk całkowity NETTO według okresu</Text>
+                <View style={styles.periodGrid}>
+                  {profitWindows.map((item) => (
+                    <View key={item.label} style={styles.periodCard}>
+                      <Text style={styles.periodLabel}>{item.label}</Text>
+                      <Text style={[styles.periodNet, item.net >= 0 ? styles.profit : styles.loss]}>
+                        {item.net >= 0 ? '+' : ''}{formatNumber(item.net, 4)} USDT
+                      </Text>
+                      <Text style={styles.periodMeta}>brutto {item.gross >= 0 ? '+' : ''}{formatNumber(item.gross, 4)} • fee {formatNumber(item.fees, 4)}</Text>
+                      <Text style={styles.periodMeta}>{item.cycles} zamkniętych cykli</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
             </View>
           );
         })()}
@@ -471,6 +537,13 @@ const styles = StyleSheet.create({
   summaryValue: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', marginTop: 3 },
   summaryPnl: { fontSize: 13, fontWeight: '900', marginTop: 8 },
   summaryNote: { color: '#8E8E93', fontSize: 10, lineHeight: 14, marginTop: 8 },
+  periodSection: { marginTop: 14, borderTopWidth: 1, borderTopColor: '#2F2F2F', paddingTop: 12 },
+  periodTitle: { color: '#FFFFFF', fontSize: 12, fontWeight: '900', marginBottom: 8 },
+  periodGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  periodCard: { width: '48%', backgroundColor: '#202020', borderRadius: 8, padding: 8 },
+  periodLabel: { color: '#F0B90B', fontSize: 11, fontWeight: '900' },
+  periodNet: { fontSize: 12, fontWeight: '900', marginTop: 4 },
+  periodMeta: { color: '#8E8E93', fontSize: 9, lineHeight: 13, marginTop: 2 },
   exportRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
   exportButton: { flex: 1, backgroundColor: '#F0B90B', borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
   exportButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
