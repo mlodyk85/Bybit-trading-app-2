@@ -13,7 +13,7 @@ import {
 import * as FileSystem from 'expo-file-system';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { fetchSpotExecutions } from '../api/bybit';
+import { fetchSpotExecutionsHistory } from '../api/bybit';
 import { ApiCredentials, SpotExecution } from '../api/types';
 
 interface Props {
@@ -252,8 +252,18 @@ function buildPdfHtml(rows: SpotExecution[], realized: Map<string, RealizedTrade
   </html>`;
 }
 
+type ReportRange = '24h' | '7d' | '30d' | '365d';
+
+const RANGE_MS: Record<ReportRange, number> = {
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+  '365d': 365 * 24 * 60 * 60 * 1000,
+};
+
 export const ReportScreen: React.FC<Props> = ({ credentials }) => {
   const [rows, setRows] = useState<SpotExecution[]>([]);
+  const [range, setRange] = useState<ReportRange>('7d');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -263,14 +273,16 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
     manual ? setRefreshing(true) : setLoading(true);
     setError('');
     try {
-      setRows(await fetchSpotExecutions(credentials, 100));
+      const endTime = Date.now();
+      const startTime = endTime - RANGE_MS[range];
+      setRows(await fetchSpotExecutionsHistory(credentials, startTime, endTime, 10000));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Nie udało się pobrać raportu.');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [credentials]);
+  }, [credentials, range]);
 
   const exportCsv = async () => {
     if (rows.length === 0 || exporting) return;
@@ -323,6 +335,49 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
             <Text style={styles.refreshText}>Odśwież</Text>
           </TouchableOpacity>
         </View>
+
+        <View style={styles.rangeRow}>
+          {(['24h', '7d', '30d', '365d'] as ReportRange[]).map((item) => (
+            <TouchableOpacity
+              key={item}
+              style={[styles.rangeButton, range === item && styles.rangeButtonActive]}
+              onPress={() => setRange(item)}
+              disabled={loading || refreshing}
+            >
+              <Text style={[styles.rangeButtonText, range === item && styles.rangeButtonTextActive]}>
+                {item === '365d' ? 'MAX' : item.toUpperCase()}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {(() => {
+          const realized = calculateRealizedResults(rows);
+          const completed = Array.from(realized.values()).filter((item) => item.complete);
+          const totalGross = completed.reduce((sum, item) => sum + item.grossProfitUsdt, 0);
+          const totalFees = completed.reduce((sum, item) => sum + item.totalFeesUsdt, 0);
+          const totalNet = completed.reduce((sum, item) => sum + item.netProfitUsdt, 0);
+          const totalBuy = rows.filter((item) => item.side === 'Buy').reduce((sum, item) => sum + (Number(item.execValue) || 0), 0);
+          const totalSell = rows.filter((item) => item.side === 'Sell').reduce((sum, item) => sum + (Number(item.execValue) || 0), 0);
+          return (
+            <View style={styles.summaryCard}>
+              <Text style={styles.summaryTitle}>Podsumowanie okresu</Text>
+              <View style={styles.summaryGrid}>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>BUY</Text><Text style={styles.summaryValue}>{formatNumber(totalBuy, 2)} USDT</Text></View>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>SELL</Text><Text style={styles.summaryValue}>{formatNumber(totalSell, 2)} USDT</Text></View>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>Prowizje</Text><Text style={styles.summaryValue}>{formatNumber(totalFees, 4)} USDT</Text></View>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>Cykle</Text><Text style={styles.summaryValue}>{completed.length}</Text></View>
+              </View>
+              <Text style={[styles.summaryPnl, totalGross >= 0 ? styles.profit : styles.loss]}>
+                PnL brutto: {totalGross >= 0 ? '+' : ''}{formatNumber(totalGross, 4)} USDT
+              </Text>
+              <Text style={[styles.summaryPnl, totalNet >= 0 ? styles.profit : styles.loss]}>
+                PnL NETTO: {totalNet >= 0 ? '+' : ''}{formatNumber(totalNet, 4)} USDT
+              </Text>
+              <Text style={styles.summaryNote}>Wczytano {rows.length} wykonań. MAX = do 365 dni historii dostępnej przez API.</Text>
+            </View>
+          );
+        })()}
 
         <View style={styles.exportRow}>
           <TouchableOpacity
@@ -403,6 +458,19 @@ const styles = StyleSheet.create({
   subtitle: { color: '#8E8E93', marginTop: 4 },
   refreshButton: { backgroundColor: '#242424', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10 },
   refreshText: { color: '#F0B90B', fontWeight: '700' },
+  rangeRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  rangeButton: { flex: 1, backgroundColor: '#202020', borderWidth: 1, borderColor: '#3A3A3A', borderRadius: 8, paddingVertical: 9, alignItems: 'center' },
+  rangeButtonActive: { backgroundColor: '#F0B90B', borderColor: '#F0B90B' },
+  rangeButtonText: { color: '#C8C8CC', fontSize: 11, fontWeight: '800' },
+  rangeButtonTextActive: { color: '#111111' },
+  summaryCard: { backgroundColor: '#171717', borderWidth: 1, borderColor: '#3A3A3A', borderRadius: 12, padding: 12, marginTop: 12 },
+  summaryTitle: { color: '#FFFFFF', fontSize: 14, fontWeight: '900', marginBottom: 8 },
+  summaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  summaryItem: { width: '48%', backgroundColor: '#202020', borderRadius: 8, padding: 8 },
+  summaryLabel: { color: '#8E8E93', fontSize: 10, fontWeight: '700' },
+  summaryValue: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', marginTop: 3 },
+  summaryPnl: { fontSize: 13, fontWeight: '900', marginTop: 8 },
+  summaryNote: { color: '#8E8E93', fontSize: 10, lineHeight: 14, marginTop: 8 },
   exportRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
   exportButton: { flex: 1, backgroundColor: '#F0B90B', borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
   exportButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
