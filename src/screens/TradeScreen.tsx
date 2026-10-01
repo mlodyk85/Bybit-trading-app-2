@@ -686,9 +686,7 @@ export const TradeScreen: React.FC<Props> = ({
             ? Math.max(LIQUID_SCALP_MIN_GROSS_TARGET_PCT, exitPolicy.takeProfitPct)
             : smartMode === 'aggressive'
               ? Math.max(AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
-              : smartMode === 'spread'
-                ? Math.max(SPREAD_SCALP_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
-                : exitPolicy.takeProfitPct;
+              : exitPolicy.takeProfitPct;
           const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
           const makerNetTarget = position.qty > 0
             ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
@@ -719,9 +717,7 @@ export const TradeScreen: React.FC<Props> = ({
               ? LIQUID_SCALP_MIN_GROSS_TARGET_PCT
               : smartMode === 'aggressive'
                 ? AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT
-                : smartMode === 'spread'
-                  ? SPREAD_SCALP_MIN_GROSS_TARGET_PCT
-                  : AUTO_SELL_PROFIT_PCT;
+                : AUTO_SELL_PROFIT_PCT;
             const retryTarget = retryPrice * (1 + retryTargetPct / 100);
             const exitOwner = smartMode === 'liquid' ? 'liquid' : 'happy-hour';
             const retryExit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, retryTarget, exitOwner);
@@ -747,7 +743,7 @@ export const TradeScreen: React.FC<Props> = ({
       const liveModeName = smartMode === 'liquid' ? 'LIQUID SCALP'
         : smartMode === 'aggressive' ? 'AGGRESSIVE'
           : 'HAPPY HOUR';
-      setSmartStatus(`${liveModeName} BUY ${trackedPosition.symbol}: ${trade.toFixed(2)} USDT • ${exitStatus}.`);
+      setSmartStatus(`${liveModeName} BUY ${trackedPosition.symbol}: ${position.costUsdt.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Błąd BUY.';
