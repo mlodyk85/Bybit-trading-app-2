@@ -312,6 +312,7 @@ const RANGE_MS: Record<ReportRange, number> = {
 
 export const ReportScreen: React.FC<Props> = ({ credentials }) => {
   const [rows, setRows] = useState<SpotExecution[]>([]);
+  const [historyRows, setHistoryRows] = useState<SpotExecution[]>([]);
   const [range, setRange] = useState<ReportRange>('7d');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -323,8 +324,11 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
     setError('');
     try {
       const endTime = Date.now();
-      const startTime = endTime - RANGE_MS[range];
-      setRows(await fetchSpotExecutionsHistory(credentials, startTime, endTime, 10000));
+      const historyStart = endTime - RANGE_MS['365d'];
+      const fullHistory = await fetchSpotExecutionsHistory(credentials, historyStart, endTime, 20000);
+      setHistoryRows(fullHistory);
+      const cutoff = endTime - RANGE_MS[range];
+      setRows(fullHistory.filter((item) => Number(item.execTime) >= cutoff));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Nie udało się pobrać raportu.');
     } finally {
@@ -337,7 +341,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
     if (rows.length === 0 || exporting) return;
     setExporting('csv');
     try {
-      const realized = calculateRealizedResults(rows);
+      const realized = calculateRealizedResults(historyRows);
       const csv = buildCsv(rows, realized);
       const fileUri = `${FileSystem.cacheDirectory}bybit-report-${Date.now()}.csv`;
       await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
@@ -354,7 +358,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
     if (rows.length === 0 || exporting) return;
     setExporting('pdf');
     try {
-      const realized = calculateRealizedResults(rows);
+      const realized = calculateRealizedResults(historyRows);
       const { uri } = await Print.printToFileAsync({ html: buildPdfHtml(rows, realized), base64: false });
       if (!(await Sharing.isAvailableAsync())) throw new Error('Udostępnianie plików nie jest dostępne na tym urządzeniu.');
       await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: 'Eksport raportu PDF' });
@@ -401,9 +405,12 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
         </View>
 
         {(() => {
-          const realized = calculateRealizedResults(rows);
-          const profitWindows = buildProfitWindowSummaries(rows, realized);
-          const completed = Array.from(realized.values()).filter((item) => item.complete);
+          const realized = calculateRealizedResults(historyRows);
+          const visibleExecIds = new Set(rows.map((item) => item.execId));
+          const profitWindows = buildProfitWindowSummaries(historyRows, realized);
+          const completed = Array.from(realized.entries())
+            .filter(([execId, item]) => visibleExecIds.has(execId) && item.complete)
+            .map(([, item]) => item);
           const totalGross = completed.reduce((sum, item) => sum + item.grossProfitUsdt, 0);
           const totalFees = completed.reduce((sum, item) => sum + item.totalFeesUsdt, 0);
           const totalNet = completed.reduce((sum, item) => sum + item.netProfitUsdt, 0);
@@ -424,7 +431,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
               <Text style={[styles.summaryPnl, totalNet >= 0 ? styles.profit : styles.loss]}>
                 PnL NETTO: {totalNet >= 0 ? '+' : ''}{formatNumber(totalNet, 4)} USDT
               </Text>
-              <Text style={styles.summaryNote}>Wczytano {rows.length} wykonań. MAX = do 365 dni historii dostępnej przez API.</Text>
+              <Text style={styles.summaryNote}>Widok: {rows.length} wykonań • baza rozliczenia FIFO: {historyRows.length} wykonań z do 365 dni. PnL nie jest już zerowany tylko dlatego, że BUY był przed wybranym zakresem.</Text>
 
               <View style={styles.periodSection}>
                 <Text style={styles.periodTitle}>Zysk całkowity NETTO według okresu</Text>
@@ -467,7 +474,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
         {!loading && !error && rows.length === 0 && <Text style={styles.empty}>Brak wykonanych transakcji Spot.</Text>}
 
         {(() => {
-          const realized = calculateRealizedResults(rows);
+          const realized = calculateRealizedResults(historyRows);
           return rows.map((item) => {
           const isBuy = item.side === 'Buy';
           const feeCurrency = item.feeCurrency || 'waluta prowizji';
