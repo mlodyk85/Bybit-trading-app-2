@@ -22,6 +22,7 @@ import {
   cancelSpotOrder,
   fetchLinearPositions,
   fetchLinearUsdtMarketCandidates,
+  fetchTradFiGoldMarketCandidates,
   closeLinearPositionMarket,
   placeLinearMarketOrderByMargin,
   fetchSpotExecutions,
@@ -55,7 +56,7 @@ interface Props {
   onHoldingConsumed?: () => void;
 }
 
-type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'basket';
+type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'basket' | 'gold';
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -446,17 +447,17 @@ export const TradeScreen: React.FC<Props> = ({
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
     const scanNo = scanCountRef.current + 1;
-    const fastMode = smartMode === 'aggressive' || smartMode === 'basket';
+    const fastMode = smartMode === 'aggressive' || smartMode === 'basket' || smartMode === 'gold';
     const scanSamples = fastMode ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
     const scanIntervalMs = fastMode ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
-    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'basket' ? ' • FUTURES BASKET' : '';
+    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'basket' ? ' • FUTURES BASKET' : smartMode === 'gold' ? ' • GOLD SCALPER' : '';
     setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${modeLabel}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
 
     for (let sample = 0; sample < scanSamples; sample += 1) {
       if (stopRef.current) return null;
-      latest = smartMode === 'basket' ? await fetchLinearUsdtMarketCandidates(160) : await fetchSpotUsdtMarketCandidates(240);
+      latest = smartMode === 'gold' ? await fetchTradFiGoldMarketCandidates(12) : smartMode === 'basket' ? await fetchLinearUsdtMarketCandidates(160) : await fetchSpotUsdtMarketCandidates(240);
       for (const item of latest) {
         const history = tracks.get(item.symbol) || [];
         history.push(item);
@@ -473,7 +474,7 @@ export const TradeScreen: React.FC<Props> = ({
 
     for (const now of latest) {
       // Spot modes never trade strategic CORE. FUTURES BASKET uses independent linear positions.
-      if (smartMode !== 'basket' && STRATEGIC_CORE_SYMBOLS.has(now.symbol)) continue;
+      if (smartMode !== 'basket' && smartMode !== 'gold' && STRATEGIC_CORE_SYMBOLS.has(now.symbol)) continue;
       const history = tracks.get(now.symbol) || [];
       if (history.length < 4) continue;
       const first = history[0];
@@ -489,10 +490,10 @@ export const TradeScreen: React.FC<Props> = ({
     }
     let best: SmartCandidateScore | null = null;
 
-    if (smartMode === 'aggressive' || smartMode === 'basket') {
+    if (smartMode === 'aggressive' || smartMode === 'basket' || smartMode === 'gold') {
       // AGGRESSIVE/FUTURES BASKET use a permissive short-term momentum ranking.
       const aggressiveRows = adaptiveRows
-        .filter((row) => row.market.turnover24h >= (smartMode === 'basket' ? 5_000_000 : 250_000) && row.market.spreadPct >= 0 && row.market.spreadPct <= (smartMode === 'basket' ? 0.12 : 0.45))
+        .filter((row) => row.market.turnover24h >= (smartMode === 'basket' ? 5_000_000 : smartMode === 'gold' ? 0 : 250_000) && row.market.spreadPct >= 0 && row.market.spreadPct <= (smartMode === 'basket' ? 0.12 : smartMode === 'gold' ? 0.20 : 0.45))
         .filter((row) => row.shortMomentumPct >= -0.01 || row.windowMomentumPct <= -0.02)
         .map((row) => ({
           ...row,
@@ -1428,9 +1429,9 @@ export const TradeScreen: React.FC<Props> = ({
       setSmartStatus(`${smartMode.toUpperCase()}: żądano ${requestedTrade.toFixed(2)} USDT, ale limit/saldo pozwala na ${trade.toFixed(2)} USDT — uruchamiam z tą kwotą.`);
     }
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
-    if (smartMode === 'basket' && (!Number.isFinite(basketTargetValue) || basketTargetValue <= 0)) return setError('FUTURES BASKET: cel koszyka musi być > 0 USDT.');
-    if (smartMode === 'basket' && (!Number.isFinite(basketMaxLossValue) || basketMaxLossValue <= 0)) return setError('FUTURES BASKET: max strata musi być > 0 USDT.');
-    if (smartMode === 'basket' && (!Number.isFinite(basketLeverageValue) || basketLeverageValue < 1 || basketLeverageValue > 5)) return setError('FUTURES BASKET: do testu dźwignia 1x–5x.');
+    if ((smartMode === 'basket' || smartMode === 'gold') && (!Number.isFinite(basketTargetValue) || basketTargetValue <= 0)) return setError('FUTURES BASKET: cel koszyka musi być > 0 USDT.');
+    if ((smartMode === 'basket' || smartMode === 'gold') && (!Number.isFinite(basketMaxLossValue) || basketMaxLossValue <= 0)) return setError('FUTURES BASKET: max strata musi być > 0 USDT.');
+    if ((smartMode === 'basket' || smartMode === 'gold') && (!Number.isFinite(basketLeverageValue) || basketLeverageValue < 1 || basketLeverageValue > 5)) return setError('FUTURES BASKET: do testu dźwignia 1x–5x.');
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
     if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Minimalna liczba cykli: 1–1000.');
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
@@ -1460,8 +1461,8 @@ export const TradeScreen: React.FC<Props> = ({
     setActiveScore(null);
     setScanInfo(smartMode === 'aggressive'
       ? `AGGRESSIVE • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • szybki skan`
-      : smartMode === 'basket'
-        ? `FUTURES BASKET • margin ${trade.toFixed(2)} USDT/pozycję • ${basketLeverageValue.toFixed(1)}x • do ${slots} pozycji • TP +${basketTargetValue.toFixed(2)} • SL -${basketMaxLossValue.toFixed(2)} USDT`
+      : smartMode === 'basket' || smartMode === 'gold'
+        ? `${smartMode === 'gold' ? 'GOLD SCALPER' : 'FUTURES BASKET'} • margin ${trade.toFixed(2)} USDT/pozycję • ${basketLeverageValue.toFixed(1)}x • do ${slots} pozycji • TP +${basketTargetValue.toFixed(2)} • SL -${basketMaxLossValue.toFixed(2)} USDT`
         : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
 
     if (smartMode === 'shadow') {
@@ -1537,7 +1538,7 @@ export const TradeScreen: React.FC<Props> = ({
               setSmartStatus(`DEMO: monitoruję ${refreshed.length}/${slots} pozycji.`);
               await sleep(1600);
             }
-          } else if (smartMode === 'basket') {
+          } else if (smartMode === 'basket' || smartMode === 'gold') {
             const basketState = await manageFuturesBasket(basketTargetValue, basketMaxLossValue);
             const current = await refreshFuturesBasketPositions();
             if (basketState !== 'open' || current.length < slots) {
@@ -1683,6 +1684,7 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity onPress={disableHappyHour} style={[styles.modeButton, styles.offModeButton, smartMode === 'off' && styles.modeSelected]}><Text style={styles.modeText}>OFF</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('basket'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'basket' && styles.modeSelected]}><Text style={styles.modeText}>FUTURES BASKET</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('gold'); setMaxSlots('1'); setBasketTarget('0.50'); setBasketMaxLoss('1.50'); setBasketLeverage('2'); }} style={[styles.modeButton, smartMode === 'gold' && styles.modeSelected]}><Text style={styles.modeText}>GOLD SCALPER</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
@@ -1692,8 +1694,8 @@ export const TradeScreen: React.FC<Props> = ({
               <TextInput value={aggressiveCapital} onChangeText={setAggressiveCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.capitalHint}>Jeśli wpiszesz więcej niż globalny limit lub wolne saldo, tryb automatycznie użyje maksymalnej dostępnej kwoty. Globalny limit: {maxOrderUsdt.toFixed(2)} USDT.</Text>
             </>}
-            {smartMode === 'basket' && <>
-              <Text style={styles.aggressiveNotice}>FUTURES BASKET — USDT PERPETUAL: otwiera LONG lub SHORT zależnie od krótkiego momentum. Każda pozycja używa ustawionego marginu i dźwigni. Cały koszyk jest zamykany reduce-only po osiągnięciu wspólnego TP albo SL.</Text>
+            {(smartMode === 'basket' || smartMode === 'gold') && <>
+              <Text style={styles.aggressiveNotice}>{smartMode === 'gold' ? 'GOLD SCALPER — TradFi GOLD PERPETUAL: automatycznie wykrywa kontrakt złota z metadanych Bybit V5, handluje LONG/SHORT według krótkiego momentum i po zamknięciu od razu szuka kolejnego wejścia. Jeden slot ogranicza kumulację ryzyka.' : 'FUTURES BASKET — USDT PERPETUAL:'} otwiera LONG lub SHORT zależnie od krótkiego momentum. Każda pozycja używa ustawionego marginu i dźwigni. Cały koszyk jest zamykany reduce-only po osiągnięciu wspólnego TP albo SL.</Text>
               <Text style={styles.smallLabel}>Margin na jedną pozycję FUTURES</Text>
               <TextInput value={basketCapital} onChangeText={setBasketCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.smallLabel}>Dźwignia FUTURES (1x–5x testowo)</Text>
@@ -1712,7 +1714,7 @@ export const TradeScreen: React.FC<Props> = ({
             </View>
             <View style={styles.grid}>
               <View style={styles.field}><Text style={styles.smallLabel}>Min. cykli</Text><TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
-              <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty {smartMode === 'aggressive' || smartMode === 'basket' ? '1–6' : '1–3'}</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
+              <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty {smartMode === 'aggressive' || smartMode === 'basket' ? '1–6' : smartMode === 'gold' ? '1' : '1–3'}</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
             </View>
             {smartMode === 'shadow' ? (
               <><Text style={styles.smallLabel}>Kapitał DEMO (min. 10 USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
@@ -1731,7 +1733,7 @@ export const TradeScreen: React.FC<Props> = ({
             {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
-            {smartMode === 'basket' && futuresBasketPositions.map((position) => (
+            {(smartMode === 'basket' || smartMode === 'gold') && futuresBasketPositions.map((position) => (
               <View key={`fut-${position.symbol}-${position.side}`} style={styles.positionCard}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.positionSymbol}>{position.symbol} • {position.side === 'Buy' ? 'LONG' : 'SHORT'} • {position.leverage || basketLeverage}x</Text>
@@ -1741,7 +1743,7 @@ export const TradeScreen: React.FC<Props> = ({
               </View>
             ))}
 
-            {smartMode !== 'basket' && positionsToRender.map((position) => {
+            {smartMode !== 'basket' && smartMode !== 'gold' && positionsToRender.map((position) => {
               const state = position.currentPnlUsdt <= 0 ? 'CZEKA NA PLUS' : position.sellReady ? 'AUTO SELL READY' : 'NETTO NA PLUSIE';
               return <View key={position.id} style={styles.positionCard}><View style={{ flex: 1 }}>
                 <Text style={styles.positionSymbol}>{position.symbol} • {position.fromPortfolio ? 'ACCUMULATION' : state}</Text>
@@ -1756,7 +1758,7 @@ export const TradeScreen: React.FC<Props> = ({
             ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
             : smartMode === 'off'
               ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START FUTURES BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START FUTURES BASKET' : smartMode === 'gold' ? 'START GOLD SCALPER' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
