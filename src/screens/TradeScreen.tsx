@@ -20,7 +20,6 @@ import { activateTradingEngine, deactivateTradingEngine } from '../services/trad
 import { loadTradingRunState, setTradingRunRequested } from '../services/tradingRunState';
 import {
   cancelSpotOrder,
-  fetchLinearMarketSnapshot,
   fetchLinearPositions,
   fetchLinearUsdtMarketCandidates,
   closeLinearPositionMarket,
