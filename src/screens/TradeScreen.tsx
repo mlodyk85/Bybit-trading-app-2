@@ -56,7 +56,7 @@ interface Props {
   onHoldingConsumed?: () => void;
 }
 
-type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'basket' | 'gold';
+type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'rotation' | 'basket' | 'gold';
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -86,6 +86,7 @@ interface TrackedPosition {
   trailingExit?: boolean;
   closed?: boolean;
   realizedPnlUsdt?: number;
+  createdAt?: number;
 }
 
 interface AccumulationCycle {
@@ -116,6 +117,21 @@ const AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT = 0.28;
 const AGGRESSIVE_MAX_SLOTS = 6;
 const AGGRESSIVE_SCAN_SAMPLES = 4;
 const AGGRESSIVE_SCAN_INTERVAL_MS = 450;
+// CAPITAL ROTATION: inventory/risk constrained mode inspired by inventory skew
+// and drawdown/cooldown protections used by mature bot frameworks.
+const ROTATION_MAX_SLOTS = 2;
+const ROTATION_MIN_FREE_EQUITY_PCT = 40;
+const ROTATION_MAX_SPOT_EXPOSURE_PCT = 60;
+const ROTATION_MIN_FREE_USDT = 10;
+const ROTATION_MIN_REBOUND_PCT = 0.015;
+const ROTATION_MIN_WINDOW_DIP_PCT = -0.02;
+const ROTATION_MAX_SPREAD_PCT = 0.20;
+const ROTATION_MIN_TURNOVER_USDT = 2_000_000;
+const ROTATION_MIN_NET_USDT = 0.12;
+const ROTATION_MAX_NET_USDT = 0.35;
+const ROTATION_TARGET_NET_PCT = 1.20;
+const ROTATION_STALE_HOURS = 24;
+const ROTATION_COOLDOWN_MS = 30 * 60 * 1000;
 const FUTURES_BASKET_MAX_SLOTS = 6;
 const FUTURES_BASKET_DEFAULT_TARGET_USDT = 0.50;
 const FUTURES_BASKET_DEFAULT_MAX_LOSS_USDT = 3.00;
@@ -166,6 +182,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [maxSlots, setMaxSlots] = useState('2');
   const [shadowCapital, setShadowCapital] = useState('25');
   const [aggressiveCapital, setAggressiveCapital] = useState(String(Math.min(50, maxOrderUsdt)));
+  const [rotationCapital, setRotationCapital] = useState(String(Math.min(25, maxOrderUsdt)));
   const [basketCapital, setBasketCapital] = useState(String(Math.min(20, maxOrderUsdt)));
   const [basketTarget, setBasketTarget] = useState(String(FUTURES_BASKET_DEFAULT_TARGET_USDT));
   const [basketMaxLoss, setBasketMaxLoss] = useState(String(FUTURES_BASKET_DEFAULT_MAX_LOSS_USDT));
@@ -204,6 +221,7 @@ export const TradeScreen: React.FC<Props> = ({
   const smartRunningRef = useRef(false);
   const accumulationRunningRef = useRef(false);
   const futuresBasketSymbolsRef = useRef<string[]>([]);
+  const rotationCooldownRef = useRef<Map<string, number>>(new Map());
   // Only REALIZED positive USDT profit feeds strategic accumulation.
   // Existing CORE balances are never sold to finance this pool.
   const coreAccumulationFundRef = useRef(0);
@@ -447,10 +465,10 @@ export const TradeScreen: React.FC<Props> = ({
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
     const scanNo = scanCountRef.current + 1;
-    const fastMode = smartMode === 'aggressive' || smartMode === 'basket' || smartMode === 'gold';
+    const fastMode = smartMode === 'aggressive' || smartMode === 'rotation' || smartMode === 'basket' || smartMode === 'gold';
     const scanSamples = fastMode ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
     const scanIntervalMs = fastMode ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
-    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'basket' ? ' • FUTURES BASKET' : smartMode === 'gold' ? ' • GOLD SCALPER' : '';
+    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'rotation' ? ' • CAPITAL ROTATION' : smartMode === 'basket' ? ' • FUTURES BASKET' : smartMode === 'gold' ? ' • GOLD SCALPER' : '';
     setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${modeLabel}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
@@ -490,7 +508,26 @@ export const TradeScreen: React.FC<Props> = ({
     }
     let best: SmartCandidateScore | null = null;
 
-    if (smartMode === 'aggressive' || smartMode === 'basket' || smartMode === 'gold') {
+    if (smartMode === 'rotation') {
+      const nowMs = Date.now();
+      const rotationRows = adaptiveRows
+        .filter((row) => row.market.turnover24h >= ROTATION_MIN_TURNOVER_USDT)
+        .filter((row) => row.market.spreadPct >= 0 && row.market.spreadPct <= ROTATION_MAX_SPREAD_PCT)
+        .filter((row) => row.windowMomentumPct <= ROTATION_MIN_WINDOW_DIP_PCT && row.shortMomentumPct >= ROTATION_MIN_REBOUND_PCT)
+        .filter((row) => (rotationCooldownRef.current.get(row.market.symbol) || 0) <= nowMs)
+        .map((row) => ({
+          ...row,
+          regime: 'RANGE' as MarketRegime,
+          strategy: 'RANGE_GRID' as EntryStrategy,
+          score:
+            Math.log10(Math.max(1, row.market.turnover24h)) * 4
+            - row.market.spreadPct * 140
+            + row.shortMomentumPct * 260
+            + Math.min(0.20, Math.abs(row.windowMomentumPct)) * 45,
+        }))
+        .sort((a, b) => b.score - a.score);
+      best = rotationRows[0] || null;
+    } else if (smartMode === 'aggressive' || smartMode === 'basket' || smartMode === 'gold') {
       // AGGRESSIVE/FUTURES BASKET use a permissive short-term momentum ranking.
       const aggressiveRows = adaptiveRows
         .filter((row) => row.market.turnover24h >= (smartMode === 'basket' ? 5_000_000 : smartMode === 'gold' ? 0 : 250_000) && row.market.spreadPct >= 0 && row.market.spreadPct <= (smartMode === 'basket' ? 0.12 : smartMode === 'gold' ? 0.20 : 0.45))
@@ -596,13 +633,17 @@ export const TradeScreen: React.FC<Props> = ({
     const trailingExit = peakMovePct >= (position.trailArmPct || Number.POSITIVE_INFINITY)
       && peakMovePct - movePct >= (position.trailDropPct || Number.POSITIVE_INFINITY)
       && currentPnlUsdt >= minNetProfit;
-    const exitMovePct = smartMode === 'aggressive' ? AGGRESSIVE_AUTO_SELL_PROFIT_PCT : AUTO_SELL_PROFIT_PCT;
+    const exitMovePct = smartMode === 'aggressive' ? AGGRESSIVE_AUTO_SELL_PROFIT_PCT : smartMode === 'rotation' ? 0.20 : AUTO_SELL_PROFIT_PCT;
     const sellReady = ((!position.exitOrderId && movePct >= exitMovePct) || trailingExit) && currentPnlUsdt >= minNetProfit;
+    const ageHours = position.createdAt ? (Date.now() - position.createdAt) / 3_600_000 : 0;
+    if (smartMode === 'rotation' && ageHours >= ROTATION_STALE_HOURS && currentPnlUsdt <= 0) {
+      return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady: false, trailingExit: false };
+    }
     return { ...position, peakMovePct, currentMovePct: movePct, currentPnlUsdt, sellReady, trailingExit };
   };
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
-    if (!candidate || stopRef.current || !['assist', 'aggressive'].includes(smartMode)) return;
+    if (!candidate || stopRef.current || !['assist', 'aggressive', 'rotation'].includes(smartMode)) return;
     // Spot automation does not touch strategic CORE.
     if (STRATEGIC_CORE_SYMBOLS.has(candidate.market.symbol)) {
       setSmartStatus(`CORE LOCK: ${candidate.market.symbol} pominięty przez silnik handlowy — tylko akumulacja.`);
@@ -619,16 +660,38 @@ export const TradeScreen: React.FC<Props> = ({
       const openBuyOrdersUsdt = openOrders.filter((order) => order.side === 'Buy').reduce((sum, order) => sum + (Number(order.qty) || 0) * (Number(order.price) || 0), 0);
       const reservationId = `happy-buy-${candidate.market.symbol}-${Date.now()}`;
       const active = livePositionsRef.current.filter((item) => !item.fromPortfolio).length;
-      const modeMaxSlots = smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : 2;
-      const reservePct = smartMode === 'aggressive' ? 10 : 35;
-      const reserveFloor = smartMode === 'aggressive' ? 5 : 10;
+      const modeMaxSlots = smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'rotation' ? ROTATION_MAX_SLOTS : 2;
+      const reservePct = smartMode === 'aggressive' ? 10 : smartMode === 'rotation' ? ROTATION_MIN_FREE_EQUITY_PCT : 35;
+      const reserveFloor = smartMode === 'aggressive' ? 5 : smartMode === 'rotation' ? ROTATION_MIN_FREE_USDT : 10;
+
+      let rotationBlockedReason = '';
+      if (smartMode === 'rotation') {
+        const wallet = await fetchWalletBalance(credentials);
+        const totalEquity = Math.max(0, Number(wallet?.totalEquity || 0));
+        const nonUsdtSpotValue = (wallet?.coin || [])
+          .filter((coin) => coin.coin !== 'USDT')
+          .reduce((sum, coin) => sum + Math.max(0, Number(coin.usdValue || 0)), 0);
+        const freePct = totalEquity > 0 ? free / totalEquity * 100 : 0;
+        const spotExposurePct = totalEquity > 0 ? nonUsdtSpotValue / totalEquity * 100 : 100;
+        const meaningfulHoldings = (wallet?.coin || []).filter((coin) => coin.coin !== 'USDT' && Number(coin.usdValue || 0) >= SMART_MIN_TRADE_USDT).length;
+
+        if (totalEquity <= 0) rotationBlockedReason = 'brak poprawnej wartości equity';
+        else if (free < ROTATION_MIN_FREE_USDT) rotationBlockedReason = `wolne USDT ${free.toFixed(2)} < ${ROTATION_MIN_FREE_USDT.toFixed(2)}`;
+        else if (freePct < ROTATION_MIN_FREE_EQUITY_PCT) rotationBlockedReason = `wolne USDT to tylko ${freePct.toFixed(1)}% equity (minimum ${ROTATION_MIN_FREE_EQUITY_PCT}%)`;
+        else if (spotExposurePct >= ROTATION_MAX_SPOT_EXPOSURE_PCT) rotationBlockedReason = `ekspozycja Spot ${spotExposurePct.toFixed(1)}% (limit ${ROTATION_MAX_SPOT_EXPOSURE_PCT}%)`;
+        else if (meaningfulHoldings >= 4) rotationBlockedReason = `portfel ma już ${meaningfulHoldings} aktywów >= ${SMART_MIN_TRADE_USDT.toFixed(0)} USDT — najpierw uwolnij kapitał`;
+      }
+
       const freeAfterReserve = Math.max(0, free - Math.max(reserveFloor, free * reservePct / 100) - openBuyOrdersUsdt - coreAccumulationFundRef.current);
-      const modeCanReserve = active < modeMaxSlots && trade <= freeAfterReserve + 1e-8;
+      const modeCanReserve = !rotationBlockedReason && active < modeMaxSlots && trade <= freeAfterReserve + 1e-8;
       const reserved = smartMode === 'assist'
         ? capitalManagerRef.current.tryReserve(reservationId, trade, {
             walletFreeUsdt: free, openBuyOrdersUsdt, managedPositionsCostUsdt: livePositionsRef.current.reduce((sum, item) => sum + item.costUsdt, 0), smartReservedUsdt: coreAccumulationFundRef.current,
           }, active)
         : modeCanReserve;
+      if (rotationBlockedReason) {
+        setSmartStatus(`CAPITAL ROTATION: BUY BLOCKED • ${rotationBlockedReason}. Monitoruję istniejące pozycje, nie dokładam.`);
+      }
       if (!reserved) {
         setSmartStatus(`CAPITAL RESERVE: wolne ${free.toFixed(2)} USDT • po rezerwie ${freeAfterReserve.toFixed(2)} USDT • potrzebuję ${trade.toFixed(2)} USDT.`);
         return;
@@ -660,6 +723,7 @@ export const TradeScreen: React.FC<Props> = ({
         currentMovePct: 0,
         currentPnlUsdt: 0,
         sellReady: false,
+        createdAt: Date.now(),
       };
 
       let trackedPosition = position;
@@ -669,13 +733,17 @@ export const TradeScreen: React.FC<Props> = ({
       // This keeps the exit visible on Bybit and survives app/background interruptions.
       {
         try {
-          const minNetProfit = Math.max(LIVE_MIN_NET_PROFIT_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+          const minNetProfit = smartMode === 'rotation'
+            ? Math.max(ROTATION_MIN_NET_USDT, Math.min(ROTATION_MAX_NET_USDT, position.costUsdt * (ROTATION_TARGET_NET_PCT / 100)))
+            : Math.max(LIVE_MIN_NET_PROFIT_USDT, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
           // Let stronger short-term moves breathe instead of clipping every trade at the same 0.35%.
           // The floor still covers fees/slippage; the cap prevents an unrealistic distant exit.
           const exitPolicy = dynamicExitPolicy(candidate.regime, candidate.volatilityPct, MARKET_ROUND_TRIP_FEE_PCT + SLIPPAGE_SAFETY_PCT);
           const dynamicProfitPct = smartMode === 'aggressive'
             ? Math.max(AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.08)
-            : exitPolicy.takeProfitPct;
+            : smartMode === 'rotation'
+              ? Math.max(0.35, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.12)
+              : exitPolicy.takeProfitPct;
           const grossTarget = position.entryPrice * (1 + dynamicProfitPct / 100);
           const makerNetTarget = position.qty > 0
             ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
@@ -704,7 +772,9 @@ export const TradeScreen: React.FC<Props> = ({
             const retryPrice = retryMarket.ask > 0 ? retryMarket.ask : retryMarket.lastPrice;
             const retryTargetPct = smartMode === 'aggressive'
               ? AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT
-              : AUTO_SELL_PROFIT_PCT;
+              : smartMode === 'rotation'
+                ? Math.max(0.35, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.12)
+                : AUTO_SELL_PROFIT_PCT;
             const retryTarget = retryPrice * (1 + retryTargetPct / 100);
             const exitOwner = 'happy-hour';
             const retryExit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, retryTarget, exitOwner);
@@ -727,7 +797,8 @@ export const TradeScreen: React.FC<Props> = ({
 
       livePositionsRef.current = [...livePositionsRef.current, trackedPosition];
       setLivePositions([...livePositionsRef.current]);
-      const liveModeName = smartMode === 'aggressive' ? 'AGGRESSIVE' : 'HAPPY HOUR';
+      const liveModeName = smartMode === 'aggressive' ? 'AGGRESSIVE' : smartMode === 'rotation' ? 'CAPITAL ROTATION' : 'HAPPY HOUR';
+      if (smartMode === 'rotation') rotationCooldownRef.current.set(trackedPosition.symbol, Date.now() + ROTATION_COOLDOWN_MS);
       setSmartStatus(`${liveModeName} BUY ${trackedPosition.symbol}: ${position.costUsdt.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
@@ -1389,7 +1460,9 @@ export const TradeScreen: React.FC<Props> = ({
     if (smartMode === 'off') return setError('HAPPY HOUR jest wyłączony. Wybierz tryb handlu.');
     const requestedTrade = smartMode === 'aggressive'
       ? toNumber(aggressiveCapital)
-      : smartMode === 'basket'
+      : smartMode === 'rotation'
+        ? toNumber(rotationCapital)
+        : smartMode === 'basket'
         ? toNumber(basketCapital)
         : toNumber(amount);
     const freshFreeUsdt = smartMode === 'shadow' ? availableUsdt : await refreshAvailableUsdt();
@@ -1401,7 +1474,7 @@ export const TradeScreen: React.FC<Props> = ({
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
     const requestedSlots = Math.floor(toNumber(maxSlots)) || 1;
-    const slots = Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? FUTURES_BASKET_MAX_SLOTS : 3, requestedSlots));
+    const slots = Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'rotation' ? ROTATION_MAX_SLOTS : smartMode === 'basket' ? FUTURES_BASKET_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
     const basketTargetValue = toNumber(basketTarget);
     const basketMaxLossValue = toNumber(basketMaxLoss);
@@ -1461,6 +1534,8 @@ export const TradeScreen: React.FC<Props> = ({
     setActiveScore(null);
     setScanInfo(smartMode === 'aggressive'
       ? `AGGRESSIVE • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • szybki skan`
+      : smartMode === 'rotation'
+        ? `CAPITAL ROTATION • ${trade.toFixed(2)} USDT/pozycję • max ${slots} • min ${ROTATION_MIN_FREE_EQUITY_PCT}% equity w USDT • max ${ROTATION_MAX_SPOT_EXPOSURE_PCT}% ekspozycji Spot`
       : smartMode === 'basket' || smartMode === 'gold'
         ? `${smartMode === 'gold' ? 'GOLD SCALPER' : 'FUTURES BASKET'} • margin ${trade.toFixed(2)} USDT/pozycję • ${basketLeverageValue.toFixed(1)}x • do ${slots} pozycji • TP +${basketTargetValue.toFixed(2)} • SL -${basketMaxLossValue.toFixed(2)} USDT`
         : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
@@ -1685,9 +1760,17 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('basket'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'basket' && styles.modeSelected]}><Text style={styles.modeText}>FUTURES BASKET</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('gold'); setMaxSlots('1'); setBasketTarget('0.50'); setBasketMaxLoss('1.50'); setBasketLeverage('2'); }} style={[styles.modeButton, smartMode === 'gold' && styles.modeSelected]}><Text style={styles.modeText}>GOLD SCALPER</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('rotation'); setMaxSlots('2'); }} style={[styles.modeButton, smartMode === 'rotation' && styles.modeSelected]}><Text style={styles.modeText}>CAPITAL ROTATION</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
+            {smartMode === 'rotation' && <>
+              <Text style={styles.liquidNotice}>CAPITAL ROTATION: bot nie wykorzysta całego USDT. Blokuje nowe BUY, gdy wolne USDT spadnie poniżej 40% equity, ekspozycja Spot dojdzie do 60% albo portfel ma już zbyt wiele aktywów. Wejście wymaga spadku + potwierdzonego odbicia; każda nowa pozycja dostaje GTC SELL.</Text>
+              <Text style={styles.smallLabel}>Kapitał jednej pozycji ROTATION (USDT)</Text>
+              <TextInput value={rotationCapital} onChangeText={setRotationCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.capitalHint}>Nie sprzedaje stratnej pozycji tylko dlatego, że jest stara. Po 24 h taka pozycja blokuje dalsze dokładanie kapitału przez limity ekspozycji.</Text>
+            </>}
+
             {smartMode === 'aggressive' && <>
               <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: do 6 równoległych pozycji, skan co ~0,45 s między próbkami. Po każdym BUY bot od razu wystawia GTC LIMIT SELL na Bybit, a aktywny monitoring może wcześniej zamknąć pozycję po dodatnim PnL netto.</Text>
               <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję</Text>
@@ -1758,7 +1841,7 @@ export const TradeScreen: React.FC<Props> = ({
             ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
             : smartMode === 'off'
               ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START FUTURES BASKET' : smartMode === 'gold' ? 'START GOLD SCALPER' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'rotation' ? 'START CAPITAL ROTATION' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START FUTURES BASKET' : smartMode === 'gold' ? 'START GOLD SCALPER' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
