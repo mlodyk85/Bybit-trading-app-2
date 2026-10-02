@@ -13,13 +13,18 @@ import {
   View,
 } from 'react-native';
 import { AssetSmartAutoSeed } from '../components/AssetRow';
-import { ApiCredentials, TradeAck } from '../api/types';
+import { ApiCredentials, Position, TradeAck } from '../api/types';
 import { COIN_BUILDER_SYMBOLS, isCoreAccumulationSymbol } from '../services/coinBuilder';
 import { loadSellLockedSymbols } from '../services/tradingPreferences';
 import { activateTradingEngine, deactivateTradingEngine } from '../services/tradingForegroundService';
 import { loadTradingRunState, setTradingRunRequested } from '../services/tradingRunState';
 import {
   cancelSpotOrder,
+  fetchLinearMarketSnapshot,
+  fetchLinearPositions,
+  fetchLinearUsdtMarketCandidates,
+  closeLinearPositionMarket,
+  placeLinearMarketOrderByMargin,
   fetchSpotExecutions,
   fetchSpotMarketSnapshot,
   fetchSpotMinOrderAmt,
@@ -111,8 +116,10 @@ const AGGRESSIVE_GTC_MIN_GROSS_TARGET_PCT = 0.28;
 const AGGRESSIVE_MAX_SLOTS = 6;
 const AGGRESSIVE_SCAN_SAMPLES = 4;
 const AGGRESSIVE_SCAN_INTERVAL_MS = 450;
-const BASKET_MAX_SLOTS = 6;
-const BASKET_DEFAULT_TARGET_USDT = 0.50;
+const FUTURES_BASKET_MAX_SLOTS = 6;
+const FUTURES_BASKET_DEFAULT_TARGET_USDT = 0.50;
+const FUTURES_BASKET_DEFAULT_MAX_LOSS_USDT = 3.00;
+const FUTURES_BASKET_DEFAULT_LEVERAGE = 2;
 const LIQUID_SCALP_SYMBOLS = new Set(['BTCUSDT', 'XRPUSDT', 'ETHUSDT', 'SOLUSDT']);
 const LIQUID_SCALP_MIN_GROSS_TARGET_PCT = 0.65;
 const SPOT_MAKER_FEE_PCT = 0.075;
@@ -163,7 +170,10 @@ export const TradeScreen: React.FC<Props> = ({
   const [liquidCapital, setLiquidCapital] = useState('100');
   const [aggressiveCapital, setAggressiveCapital] = useState(String(Math.min(50, maxOrderUsdt)));
   const [basketCapital, setBasketCapital] = useState(String(Math.min(20, maxOrderUsdt)));
-  const [basketTarget, setBasketTarget] = useState(String(BASKET_DEFAULT_TARGET_USDT));
+  const [basketTarget, setBasketTarget] = useState(String(FUTURES_BASKET_DEFAULT_TARGET_USDT));
+  const [basketMaxLoss, setBasketMaxLoss] = useState(String(FUTURES_BASKET_DEFAULT_MAX_LOSS_USDT));
+  const [basketLeverage, setBasketLeverage] = useState(String(FUTURES_BASKET_DEFAULT_LEVERAGE));
+  const [futuresBasketPositions, setFuturesBasketPositions] = useState<Position[]>([]);
   const [smartSeedCapital, setSmartSeedCapital] = useState(String(Math.min(25, maxOrderUsdt)));
   const [shadowUsdt, setShadowUsdt] = useState(25);
   const [availableUsdt, setAvailableUsdt] = useState(0);
@@ -196,6 +206,7 @@ export const TradeScreen: React.FC<Props> = ({
   const sellLockedSymbolsRef = useRef<string[]>([]);
   const smartRunningRef = useRef(false);
   const accumulationRunningRef = useRef(false);
+  const futuresBasketSymbolsRef = useRef<string[]>([]);
   // Only REALIZED positive USDT profit feeds strategic accumulation.
   // Existing CORE balances are never sold to finance this pool.
   const coreAccumulationFundRef = useRef(0);
@@ -442,14 +453,14 @@ export const TradeScreen: React.FC<Props> = ({
     const fastMode = smartMode === 'aggressive' || smartMode === 'basket';
     const scanSamples = fastMode ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
     const scanIntervalMs = fastMode ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
-    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'basket' ? ' • MT5 BASKET' : smartMode === 'liquid' ? ' • LIQUID SCALP' : '';
+    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'basket' ? ' • FUTURES BASKET' : smartMode === 'liquid' ? ' • LIQUID SCALP' : '';
     setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${modeLabel}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
 
     for (let sample = 0; sample < scanSamples; sample += 1) {
       if (stopRef.current) return null;
-      latest = await fetchSpotUsdtMarketCandidates(240);
+      latest = smartMode === 'basket' ? await fetchLinearUsdtMarketCandidates(160) : await fetchSpotUsdtMarketCandidates(240);
       for (const item of latest) {
         const history = tracks.get(item.symbol) || [];
         history.push(item);
@@ -502,10 +513,9 @@ export const TradeScreen: React.FC<Props> = ({
         .sort((a, b) => b.score - a.score);
       best = liquidRows[0] || null;
     } else if (smartMode === 'aggressive' || smartMode === 'basket') {
-      // AGGRESSIVE has its own permissive ranking instead of first passing through
-      // the conservative adaptive engine. It still requires liquidity and bounded spread.
+      // AGGRESSIVE/FUTURES BASKET use a permissive short-term momentum ranking.
       const aggressiveRows = adaptiveRows
-        .filter((row) => row.market.turnover24h >= 250_000 && row.market.spreadPct >= 0 && row.market.spreadPct <= 0.45)
+        .filter((row) => row.market.turnover24h >= (smartMode === 'basket' ? 5_000_000 : 250_000) && row.market.spreadPct >= 0 && row.market.spreadPct <= (smartMode === 'basket' ? 0.12 : 0.45))
         .filter((row) => row.shortMomentumPct >= -0.01 || row.windowMomentumPct <= -0.02)
         .map((row) => ({
           ...row,
@@ -633,7 +643,7 @@ export const TradeScreen: React.FC<Props> = ({
       const openBuyOrdersUsdt = openOrders.filter((order) => order.side === 'Buy').reduce((sum, order) => sum + (Number(order.qty) || 0) * (Number(order.price) || 0), 0);
       const reservationId = `happy-buy-${candidate.market.symbol}-${Date.now()}`;
       const active = livePositionsRef.current.filter((item) => !item.fromPortfolio).length;
-      const modeMaxSlots = smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? BASKET_MAX_SLOTS : smartMode === 'liquid' ? 1 : 2;
+      const modeMaxSlots = smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? FUTURES_BASKET_MAX_SLOTS : smartMode === 'liquid' ? 1 : 2;
       const reservePct = smartMode === 'aggressive' || smartMode === 'basket' ? 10 : smartMode === 'liquid' ? 15 : 35;
       const reserveFloor = smartMode === 'aggressive' || smartMode === 'basket' ? 5 : 10;
       const freeAfterReserve = Math.max(0, free - Math.max(reserveFloor, free * reservePct / 100) - openBuyOrdersUsdt - coreAccumulationFundRef.current);
@@ -761,57 +771,81 @@ export const TradeScreen: React.FC<Props> = ({
     }
   };
 
-  const closeBasketAtTarget = async (positions: TrackedPosition[], targetNetUsdt: number): Promise<boolean> => {
-    if (smartMode !== 'basket' || sellBusyRef.current || positions.length === 0) return false;
-    const basketNet = positions.reduce((sum, item) => sum + item.currentPnlUsdt, 0);
-    if (!Number.isFinite(basketNet) || basketNet + 1e-8 < targetNetUsdt) return false;
+  const refreshFuturesBasketPositions = async (): Promise<Position[]> => {
+    const tracked = new Set(futuresBasketSymbolsRef.current);
+    if (tracked.size === 0) {
+      setFuturesBasketPositions([]);
+      return [];
+    }
+    const positions = (await fetchLinearPositions(credentials)).filter((p) => tracked.has(p.symbol.toUpperCase()) && Number(p.size || 0) > 0);
+    setFuturesBasketPositions(positions);
+    return positions;
+  };
 
-    sellBusyRef.current = true;
-    setBusy(true);
-    setError('');
-    setSmartStatus(`MT5 BASKET: cel koszyka +${targetNetUsdt.toFixed(2)} USDT osiągnięty (est. +${basketNet.toFixed(4)}). Zamykam cały koszyk...`);
+  const openFuturesBasketLeg = async (candidate: SmartCandidateScore, marginUsdt: number, leverage: number): Promise<boolean> => {
+    const symbol = candidate.market.symbol.toUpperCase();
+    if (futuresBasketSymbolsRef.current.includes(symbol)) return false;
+    if (futuresBasketSymbolsRef.current.length >= FUTURES_BASKET_MAX_SLOTS) return false;
 
-    let realizedBasket = 0;
-    const closedIds = new Set<string>();
+    // Momentum determines direction: confirmed positive impulse = LONG, negative impulse = SHORT.
+    const side: 'Buy' | 'Sell' = candidate.shortMomentumPct >= 0 ? 'Buy' : 'Sell';
+    setSmartStatus(`FUTURES BASKET: otwieram ${side === 'Buy' ? 'LONG' : 'SHORT'} ${symbol} • margin ${marginUsdt.toFixed(2)} USDT • ${leverage.toFixed(1)}x...`);
     try {
-      for (let position of positions) {
-        try {
-          if (position.exitOrderId) {
-            await cancelSpotOrder(credentials, position.symbol, position.exitOrderId);
-            position = { ...position, exitOrderId: undefined, targetSellPrice: undefined };
-          }
-          const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty, 'happy-hour');
-          const fill = await waitForSpotFill(credentials, ack.orderId);
-          const baseCoin = position.symbol.replace(/USDT$/, '');
-          const sellFeeUsdt = fill.feeByCurrency.USDT || 0;
-          const sellFeeBaseUsdt = (fill.feeByCurrency[baseCoin] || 0) * (fill.avgPrice || 0);
-          const netProceeds = Math.max(0, fill.quoteValue - sellFeeUsdt - sellFeeBaseUsdt);
-          realizedBasket += netProceeds - position.costUsdt;
-          closedIds.add(position.id);
-        } catch (e: unknown) {
-          setError(`MT5 BASKET: nie udało się zamknąć ${position.symbol}: ${e instanceof Error ? e.message : 'błąd SELL'}`);
-        }
-      }
+      await placeLinearMarketOrderByMargin(credentials, symbol, side, marginUsdt, leverage);
+      futuresBasketSymbolsRef.current = [...futuresBasketSymbolsRef.current, symbol];
+      await sleep(900);
+      await refreshFuturesBasketPositions();
+      setSmartStatus(`FUTURES BASKET: ${side === 'Buy' ? 'LONG' : 'SHORT'} ${symbol} otwarty. Koszyk ${futuresBasketSymbolsRef.current.length}/${FUTURES_BASKET_MAX_SLOTS}.`);
+      return true;
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'błąd futures';
+      setError(message);
+      setSmartStatus(`FUTURES BUY/SELL nieudany: ${message}`);
+      return false;
+    }
+  };
 
-      if (closedIds.size > 0) {
-        livePositionsRef.current = livePositionsRef.current.filter((item) => !closedIds.has(item.id));
-        setLivePositions([...livePositionsRef.current]);
-        sessionProfitRef.current += realizedBasket;
+  const manageFuturesBasket = async (targetNetUsdt: number, maxLossUsdt: number): Promise<'open' | 'closed' | 'empty'> => {
+    const positions = await refreshFuturesBasketPositions();
+    if (positions.length === 0) return 'empty';
+
+    const basketPnl = positions.reduce((sum, p) => sum + (Number(p.unrealisedPnl) || 0), 0);
+    const shouldTakeProfit = basketPnl >= targetNetUsdt;
+    const shouldStopLoss = basketPnl <= -Math.abs(maxLossUsdt);
+    if (!shouldTakeProfit && !shouldStopLoss) {
+      setSmartStatus(`FUTURES BASKET: ${positions.length} pozycji • PnL ${basketPnl >= 0 ? '+' : ''}${basketPnl.toFixed(3)} USDT • TP +${targetNetUsdt.toFixed(2)} • SL -${Math.abs(maxLossUsdt).toFixed(2)}.`);
+      return 'open';
+    }
+
+    setSmartStatus(`FUTURES BASKET: ${shouldTakeProfit ? 'TARGET' : 'STOP'} ${basketPnl >= 0 ? '+' : ''}${basketPnl.toFixed(3)} USDT — zamykam cały koszyk reduce-only...`);
+    let closed = 0;
+    for (const position of positions) {
+      try {
+        await closeLinearPositionMarket(credentials, position);
+        closed += 1;
+      } catch (e: unknown) {
+        setError(`Nie udało się zamknąć ${position.symbol}: ${e instanceof Error ? e.message : 'błąd'}`);
+      }
+    }
+    if (closed > 0) {
+      await sleep(1000);
+      const remaining = await refreshFuturesBasketPositions();
+      const remainingSymbols = new Set(remaining.map((p) => p.symbol.toUpperCase()));
+      futuresBasketSymbolsRef.current = futuresBasketSymbolsRef.current.filter((s) => remainingSymbols.has(s));
+      if (remaining.length === 0) {
+        sessionProfitRef.current += basketPnl;
         setSessionProfit(sessionProfitRef.current);
-        if (closedIds.size === positions.length) {
+        if (basketPnl > 0) {
           cycleCountRef.current += 1;
           setCycleCount(cycleCountRef.current);
         }
-        setSmartStatus(`MT5 BASKET CLOSED: ${closedIds.size}/${positions.length} pozycji • wynik NETTO ${realizedBasket >= 0 ? '+' : ''}${realizedBasket.toFixed(4)} USDT.`);
-        await refreshAvailableUsdt();
-        return closedIds.size === positions.length;
+        setSmartStatus(`FUTURES BASKET CLOSED • wynik orientacyjny ${basketPnl >= 0 ? '+' : ''}${basketPnl.toFixed(3)} USDT. Szukam nowego koszyka.`);
+        return 'closed';
       }
-      return false;
-    } finally {
-      sellBusyRef.current = false;
-      setBusy(false);
     }
+    return 'open';
   };
+
 
   const executeAssistSell = async (position: TrackedPosition) => {
     if (sellBusyRef.current || position.fromPortfolio) return;
@@ -1405,6 +1439,8 @@ export const TradeScreen: React.FC<Props> = ({
       : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? BASKET_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
     const basketTargetValue = toNumber(basketTarget);
+    const basketMaxLossValue = toNumber(basketMaxLoss);
+    const basketLeverageValue = toNumber(basketLeverage);
 
     if (!Number.isFinite(requestedTrade) || requestedTrade <= 0) {
       const message = 'Kapitał pozycji musi być większy od 0.';
@@ -1428,7 +1464,9 @@ export const TradeScreen: React.FC<Props> = ({
       setSmartStatus(`${smartMode.toUpperCase()}: żądano ${requestedTrade.toFixed(2)} USDT, ale limit/saldo pozwala na ${trade.toFixed(2)} USDT — uruchamiam z tą kwotą.`);
     }
     if (!Number.isFinite(target) || target < 0) return setError('Cel zysku: 0 lub więcej. 0 = bez limitu.');
-    if (smartMode === 'basket' && (!Number.isFinite(basketTargetValue) || basketTargetValue <= 0)) return setError('MT5 BASKET: cel koszyka musi być > 0 USDT.');
+    if (smartMode === 'basket' && (!Number.isFinite(basketTargetValue) || basketTargetValue <= 0)) return setError('FUTURES BASKET: cel koszyka musi być > 0 USDT.');
+    if (smartMode === 'basket' && (!Number.isFinite(basketMaxLossValue) || basketMaxLossValue <= 0)) return setError('FUTURES BASKET: max strata musi być > 0 USDT.');
+    if (smartMode === 'basket' && (!Number.isFinite(basketLeverageValue) || basketLeverageValue < 1 || basketLeverageValue > 5)) return setError('FUTURES BASKET: do testu dźwignia 1x–5x.');
     if (!Number.isFinite(loss) || loss <= 0) return setError('Max strata musi być > 0.');
     if (!Number.isFinite(cycles) || cycles < 1 || cycles > 1000) return setError('Minimalna liczba cykli: 1–1000.');
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
@@ -1459,7 +1497,7 @@ export const TradeScreen: React.FC<Props> = ({
     setScanInfo(smartMode === 'aggressive'
       ? `AGGRESSIVE • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • szybki skan`
       : smartMode === 'basket'
-        ? `MT5 BASKET (SPOT TEST) • ${trade.toFixed(2)} USDT/pozycję • do ${slots} pozycji • wspólny cel koszyka +${basketTargetValue.toFixed(2)} USDT NETTO`
+        ? `FUTURES BASKET • margin ${trade.toFixed(2)} USDT/pozycję • ${basketLeverageValue.toFixed(1)}x • do ${slots} pozycji • TP +${basketTargetValue.toFixed(2)} • SL -${basketMaxLossValue.toFixed(2)} USDT`
         : smartMode === 'liquid'
           ? `LIQUID SCALP • BTC/XRP/ETH/SOL • kapitał ${trade.toFixed(2)} USDT • 1 pozycja • po BUY natychmiast GTC LIMIT SELL na Bybit`
           : `Start skanera • AUTO BUY po dołku • AUTO SELL dopiero przy bezpiecznym zysku netto • SMART ACCUMULATION tylko gdy BUY BACK zwiększa ilość coina`);
@@ -1537,6 +1575,24 @@ export const TradeScreen: React.FC<Props> = ({
               setSmartStatus(`DEMO: monitoruję ${refreshed.length}/${slots} pozycji.`);
               await sleep(1600);
             }
+          } else if (smartMode === 'basket') {
+            const basketState = await manageFuturesBasket(basketTargetValue, basketMaxLossValue);
+            const current = await refreshFuturesBasketPositions();
+            if (basketState !== 'open' || current.length < slots) {
+              const free = await refreshAvailableUsdt();
+              const estimatedMarginInUse = current.length * trade;
+              if (free - estimatedMarginInUse >= trade) {
+                const candidate = await scanBestCandidate();
+                if (candidate && !futuresBasketSymbolsRef.current.includes(candidate.market.symbol.toUpperCase())) {
+                  await openFuturesBasketLeg(candidate, trade, basketLeverageValue);
+                }
+              } else {
+                setSmartStatus(`FUTURES BASKET: wolne USDT ${free.toFixed(2)} • aktywne ${current.length}/${slots} • brak marginesu na kolejne wejście.`);
+                await sleep(900);
+              }
+            } else {
+              await sleep(700);
+            }
           } else {
             const smartOwned = livePositionsRef.current.filter((position) => position.fromPortfolio);
             const refreshed: TrackedPosition[] = [];
@@ -1563,14 +1619,6 @@ export const TradeScreen: React.FC<Props> = ({
             }
             livePositionsRef.current = [...smartOwned, ...refreshed];
             setLivePositions([...livePositionsRef.current]);
-
-            if (smartMode === 'basket' && refreshed.length > 0) {
-              const basketClosed = await closeBasketAtTarget(refreshed.filter((item) => !item.fromPortfolio), basketTargetValue);
-              if (basketClosed) {
-                await sleep(500);
-                continue;
-              }
-            }
 
             const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
             if (sellCandidate && smartMode !== 'basket') {
@@ -1674,7 +1722,7 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('liquid'); setMaxSlots('1'); }} style={[styles.modeButton, smartMode === 'liquid' && styles.modeSelected]}><Text style={styles.modeText}>LIQUID SCALP</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
-              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('basket'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'basket' && styles.modeSelected]}><Text style={styles.modeText}>MT5 BASKET</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('basket'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'basket' && styles.modeSelected]}><Text style={styles.modeText}>FUTURES BASKET</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
             </View>
             {smartMode === 'aggressive' && <>
@@ -1684,12 +1732,16 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.capitalHint}>Jeśli wpiszesz więcej niż globalny limit lub wolne saldo, tryb automatycznie użyje maksymalnej dostępnej kwoty. Globalny limit: {maxOrderUsdt.toFixed(2)} USDT.</Text>
             </>}
             {smartMode === 'basket' && <>
-              <Text style={styles.aggressiveNotice}>MT5 BASKET — SPOT TEST: otwiera kilka niezależnych pozycji bez dźwigni. Każdy BUY ma awaryjny GTC SELL na Bybit, ale głównym celem jest łączny wynik całego koszyka. Gdy suma est. PnL osiągnie cel, bot anuluje GTC i próbuje zamknąć cały koszyk rynkowo.</Text>
-              <Text style={styles.smallLabel}>Kapitał na jedną pozycję BASKET</Text>
+              <Text style={styles.aggressiveNotice}>FUTURES BASKET — USDT PERPETUAL: otwiera LONG lub SHORT zależnie od krótkiego momentum. Każda pozycja używa ustawionego marginu i dźwigni. Cały koszyk jest zamykany reduce-only po osiągnięciu wspólnego TP albo SL.</Text>
+              <Text style={styles.smallLabel}>Margin na jedną pozycję FUTURES</Text>
               <TextInput value={basketCapital} onChangeText={setBasketCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.smallLabel}>Cel całego koszyka NETTO (USDT)</Text>
+              <Text style={styles.smallLabel}>Dźwignia FUTURES (1x–5x testowo)</Text>
+              <TextInput value={basketLeverage} onChangeText={setBasketLeverage} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.smallLabel}>Take Profit całego koszyka (USDT)</Text>
               <TextInput value={basketTarget} onChangeText={setBasketTarget} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.capitalHint}>To jest wariant testowy na Spot, bez leverage. Domyślny cel koszyka: +{BASKET_DEFAULT_TARGET_USDT.toFixed(2)} USDT.</Text>
+              <Text style={styles.smallLabel}>Max strata całego koszyka (USDT)</Text>
+              <TextInput value={basketMaxLoss} onChangeText={setBasketMaxLoss} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
+              <Text style={styles.capitalHint}>Tryb używa Bybit USDT Perpetual. Na pierwsze testy trzymaj 1x–3x; 5x jest górnym limitem tej wersji.</Text>
             </>}
             {smartMode === 'liquid' && <>
               <Text style={styles.liquidNotice}>LIQUID SCALP: tylko BTC/XRP/ETH/SOL. Jedna większa pozycja. Po BUY bot od razu wystawia GTC LIMIT SELL na Bybit dla dokładnie kupionej ilości.</Text>
@@ -1723,7 +1775,17 @@ export const TradeScreen: React.FC<Props> = ({
             {activeScore && <Text style={styles.candidate}>Kandydat BUY: {activeScore.market.symbol} • spadek {activeScore.windowMomentumPct.toFixed(4)}% • odbicie +{activeScore.shortMomentumPct.toFixed(4)}%</Text>}
             <Text style={styles.status}>{smartStatus}</Text>
 
-            {positionsToRender.map((position) => {
+            {smartMode === 'basket' && futuresBasketPositions.map((position) => (
+              <View key={`fut-${position.symbol}-${position.side}`} style={styles.positionCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.positionSymbol}>{position.symbol} • {position.side === 'Buy' ? 'LONG' : 'SHORT'} • {position.leverage || basketLeverage}x</Text>
+                  <Text style={styles.positionLine}>size {position.size} • entry {priceText(Number(position.avgPrice) || 0)} • mark {priceText(Number(position.markPrice) || 0)}</Text>
+                  <Text style={styles.positionLine}>PnL {Number(position.unrealisedPnl) >= 0 ? '+' : ''}{(Number(position.unrealisedPnl) || 0).toFixed(4)} USDT • liq {position.liqPrice || '-'}</Text>
+                </View>
+              </View>
+            ))}
+
+            {smartMode !== 'basket' && positionsToRender.map((position) => {
               const state = position.currentPnlUsdt <= 0 ? 'CZEKA NA PLUS' : position.sellReady ? 'AUTO SELL READY' : 'NETTO NA PLUSIE';
               return <View key={position.id} style={styles.positionCard}><View style={{ flex: 1 }}>
                 <Text style={styles.positionSymbol}>{position.symbol} • {position.fromPortfolio ? 'ACCUMULATION' : state}</Text>
@@ -1738,7 +1800,7 @@ export const TradeScreen: React.FC<Props> = ({
             ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
             : smartMode === 'off'
               ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START MT5 BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'liquid' ? 'START LIQUID SCALP' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START FUTURES BASKET' : 'START DEMO'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
