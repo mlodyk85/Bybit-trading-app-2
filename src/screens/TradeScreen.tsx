@@ -1583,7 +1583,7 @@ export const TradeScreen: React.FC<Props> = ({
             setLivePositions([...livePositionsRef.current]);
 
             const sellCandidate = refreshed.find((position) => !position.fromPortfolio && position.sellReady && position.currentPnlUsdt > 0);
-            if (sellCandidate && smartMode !== 'basket') {
+            if (sellCandidate) {
               await executeAssistSell(sellCandidate);
               await sleep(500);
               continue;
