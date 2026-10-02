@@ -726,10 +726,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       livePositionsRef.current = [...livePositionsRef.current, trackedPosition];
       setLivePositions([...livePositionsRef.current]);
-      const liveModeName = smartMode === 'liquid' ? 'LIQUID SCALP'
-        : smartMode === 'aggressive' ? 'AGGRESSIVE'
-          : smartMode === 'basket' ? 'MT5 BASKET'
-            : 'HAPPY HOUR';
+      const liveModeName = smartMode === 'aggressive' ? 'AGGRESSIVE' : 'HAPPY HOUR';
       setSmartStatus(`${liveModeName} BUY ${trackedPosition.symbol}: ${position.costUsdt.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
     } catch (e: unknown) {
@@ -1403,9 +1400,7 @@ export const TradeScreen: React.FC<Props> = ({
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
     const requestedSlots = Math.floor(toNumber(maxSlots)) || 1;
-    const slots = smartMode === 'liquid'
-      ? 1
-      : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? BASKET_MAX_SLOTS : 3, requestedSlots));
+    const slots = Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'basket' ? FUTURES_BASKET_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
     const basketTargetValue = toNumber(basketTarget);
     const basketMaxLossValue = toNumber(basketMaxLoss);
