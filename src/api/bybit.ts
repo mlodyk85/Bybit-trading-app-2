@@ -323,6 +323,183 @@ export async function fetchInversePositions(credentials: ApiCredentials): Promis
   return (result?.list || []).filter((p) => parseFloat(p.size) > 0);
 }
 
+
+interface LinearInstrument {
+  symbol: string;
+  status: string;
+  contractType?: string;
+  settleCoin?: string;
+  lotSizeFilter?: {
+    qtyStep?: string;
+    minOrderQty?: string;
+    maxOrderQty?: string;
+  };
+  leverageFilter?: {
+    minLeverage?: string;
+    maxLeverage?: string;
+    leverageStep?: string;
+  };
+}
+
+interface LinearInstrumentResult {
+  category: string;
+  list: LinearInstrument[];
+  nextPageCursor?: string;
+}
+
+export interface LinearTradingRules {
+  qtyStep: number;
+  minOrderQty: number;
+  maxOrderQty: number;
+  minLeverage: number;
+  maxLeverage: number;
+}
+
+async function fetchLinearInstrument(symbolInput: string): Promise<LinearInstrument> {
+  const symbol = symbolInput.trim().toUpperCase();
+  const result = await bybitPublicGet<LinearInstrumentResult>('/v5/market/instruments-info', {
+    category: 'linear',
+    symbol,
+  });
+  const instrument = result?.list?.[0];
+  if (!instrument) throw new BybitError(`Brak danych futures dla ${symbol}.`, 'NO_LINEAR_INSTRUMENT');
+  return instrument;
+}
+
+export async function fetchLinearTradingRules(symbolInput: string): Promise<LinearTradingRules> {
+  const instrument = await fetchLinearInstrument(symbolInput);
+  return {
+    qtyStep: Number(instrument.lotSizeFilter?.qtyStep || '0.001'),
+    minOrderQty: Number(instrument.lotSizeFilter?.minOrderQty || '0'),
+    maxOrderQty: Number(instrument.lotSizeFilter?.maxOrderQty || '0'),
+    minLeverage: Number(instrument.leverageFilter?.minLeverage || '1'),
+    maxLeverage: Number(instrument.leverageFilter?.maxLeverage || '1'),
+  };
+}
+
+export async function fetchLinearMarketSnapshot(symbolInput: string): Promise<SpotMarketSnapshot> {
+  const symbol = symbolInput.trim().toUpperCase();
+  const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'linear', symbol });
+  const snapshot = result?.list?.[0] ? tickerToSnapshot(result.list[0]) : null;
+  if (!snapshot) throw new BybitError(`Nie udało się pobrać ceny futures ${symbol}.`, 'NO_LINEAR_PRICE');
+  return snapshot;
+}
+
+export async function fetchLinearUsdtMarketCandidates(limit = 120): Promise<SpotMarketCandidate[]> {
+  const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'linear' });
+  return (result?.list || [])
+    .filter((ticker) => ticker.symbol.endsWith('USDT'))
+    .map((ticker) => {
+      const snapshot = tickerToSnapshot(ticker);
+      if (!snapshot || snapshot.bid <= 0 || snapshot.ask <= 0) return null;
+      const spreadPct = ((snapshot.ask - snapshot.bid) / snapshot.lastPrice) * 100;
+      return { ...snapshot, spreadPct } as SpotMarketCandidate;
+    })
+    .filter((item): item is SpotMarketCandidate => item !== null)
+    .filter((item) => item.turnover24h >= 1000000 && item.spreadPct >= 0 && item.spreadPct <= 0.35)
+    .sort((a, b) => b.turnover24h - a.turnover24h)
+    .slice(0, Math.max(5, Math.min(200, limit)));
+}
+
+export async function setLinearLeverage(
+  credentials: ApiCredentials,
+  symbolInput: string,
+  leverageInput: number
+): Promise<void> {
+  const symbol = symbolInput.trim().toUpperCase();
+  const rules = await fetchLinearTradingRules(symbol);
+  const leverage = Math.max(rules.minLeverage, Math.min(rules.maxLeverage, leverageInput));
+  const value = String(Math.round(leverage * 100) / 100);
+  try {
+    await bybitPost<Record<string, never>>('/v5/position/set-leverage', {
+      category: 'linear',
+      symbol,
+      buyLeverage: value,
+      sellLeverage: value,
+    }, credentials);
+  } catch (e: unknown) {
+    // Bybit may return an error when leverage is already set to this value.
+    const message = e instanceof Error ? e.message.toLowerCase() : '';
+    if (!message.includes('not modified') && !message.includes('same leverage')) throw e;
+  }
+}
+
+function normalizeLinearQty(value: number, step: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (!Number.isFinite(step) || step <= 0) return value;
+  const precision = Math.min(12, decimalPlaces(String(step)));
+  const factor = 10 ** precision;
+  const stepped = Math.floor((value + Number.EPSILON) / step) * step;
+  return Math.floor((stepped + Number.EPSILON) * factor) / factor;
+}
+
+export async function placeLinearMarketOrderByMargin(
+  credentials: ApiCredentials,
+  symbolInput: string,
+  side: 'Buy' | 'Sell',
+  marginUsdt: number,
+  leverageInput: number
+): Promise<CreateSpotOrderResult & { qty: number; referencePrice: number; leverage: number }> {
+  const symbol = symbolInput.trim().toUpperCase();
+  if (!Number.isFinite(marginUsdt) || marginUsdt <= 0) throw new BybitError('Margin futures musi być > 0 USDT.', 'INVALID_MARGIN');
+  const snapshot = await fetchLinearMarketSnapshot(symbol);
+  const rules = await fetchLinearTradingRules(symbol);
+  const leverage = Math.max(rules.minLeverage, Math.min(rules.maxLeverage, leverageInput));
+  await setLinearLeverage(credentials, symbol, leverage);
+
+  const referencePrice = side === 'Buy'
+    ? (snapshot.ask > 0 ? snapshot.ask : snapshot.lastPrice)
+    : (snapshot.bid > 0 ? snapshot.bid : snapshot.lastPrice);
+  const rawQty = (marginUsdt * leverage) / referencePrice;
+  const qty = normalizeLinearQty(rawQty, rules.qtyStep);
+  if (qty <= 0 || (rules.minOrderQty > 0 && qty < rules.minOrderQty)) {
+    throw new BybitError(`Pozycja futures jest poniżej minimum Bybit dla ${symbol}.`, 'MIN_LINEAR_QTY');
+  }
+  if (rules.maxOrderQty > 0 && qty > rules.maxOrderQty) {
+    throw new BybitError(`Pozycja futures przekracza maksymalną ilość Bybit dla ${symbol}.`, 'MAX_LINEAR_QTY');
+  }
+
+  const precision = Math.min(12, decimalPlaces(String(rules.qtyStep || 0.001)));
+  const orderLinkId = `fut-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
+  const result = await bybitPost<CreateSpotOrderResult>('/v5/order/create', {
+    category: 'linear',
+    symbol,
+    side,
+    orderType: 'Market',
+    qty: qty.toFixed(precision),
+    timeInForce: 'IOC',
+    reduceOnly: false,
+    positionIdx: 0,
+    orderLinkId,
+  }, credentials);
+  return { ...result, qty, referencePrice, leverage };
+}
+
+export async function closeLinearPositionMarket(
+  credentials: ApiCredentials,
+  position: Position
+): Promise<CreateSpotOrderResult> {
+  const symbol = position.symbol.trim().toUpperCase();
+  const size = Number(position.size || 0);
+  if (!Number.isFinite(size) || size <= 0) throw new BybitError('Brak aktywnej ilości futures do zamknięcia.', 'NO_LINEAR_SIZE');
+  const rules = await fetchLinearTradingRules(symbol);
+  const qty = normalizeLinearQty(size, rules.qtyStep);
+  const precision = Math.min(12, decimalPlaces(String(rules.qtyStep || 0.001)));
+  const closeSide: 'Buy' | 'Sell' = position.side === 'Sell' ? 'Buy' : 'Sell';
+  const orderLinkId = `fut-close-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`.slice(0, 36);
+  return await bybitPost<CreateSpotOrderResult>('/v5/order/create', {
+    category: 'linear',
+    symbol,
+    side: closeSide,
+    orderType: 'Market',
+    qty: qty.toFixed(precision),
+    timeInForce: 'IOC',
+    reduceOnly: true,
+    positionIdx: 0,
+    orderLinkId,
+  }, credentials);
+}
+
 export async function testBybitConnection(credentials: ApiCredentials): Promise<boolean> {
   await fetchWalletBalance(credentials);
   return true;
