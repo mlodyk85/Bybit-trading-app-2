@@ -38,3 +38,22 @@ Standalone MetaTrader 5 Expert Advisor. This is separate from the Bybit Spot/Fut
 These are risk-control defaults, not guaranteed returns.
 
 The EA checks MT5 trade result codes after requests and uses account equity, margin and free margin directly from MT5.
+
+
+## Bridge / sterowanie z telefonu
+
+EA może połączyć się z `mt5-bridge`, który jest w tym samym repo.
+
+W parametrach EA:
+- `InpBridgeEnabled = true`
+- `InpBridgeUrl = http://IP_LUB_HOST:8787`
+- `InpBridgeToken = ten sam token co MT5_BRIDGE_TOKEN`
+
+W MT5 dodaj URL Bridge do **Tools → Options → Expert Advisors → Allow WebRequest for listed URL**.
+
+Po uruchomieniu Bridge i EA zakładka **MT5** w aplikacji pokazuje telemetrykę i pozwala wysłać:
+`START`, `STOP`, `CLOSE_ALL`, `RESET_DAY_LOCK`.
+
+STOP blokuje tylko nowe wejścia. Nie zamyka pozycji. `CLOSE_ALL` zamyka pozycje zarządzane przez EA o tym samym magic number.
+
+Do dostępu przez Internet użyj HTTPS/VPN/firewalla. Nie wystawiaj surowego portu Bridge bez zabezpieczenia.
