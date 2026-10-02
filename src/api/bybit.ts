@@ -329,6 +329,12 @@ interface LinearInstrument {
   status: string;
   contractType?: string;
   settleCoin?: string;
+  baseCoin?: string;
+  quoteCoin?: string;
+  symbolType?: string;
+  fullName?: string;
+  marketRegion?: string;
+  underlyingTicker?: string;
   lotSizeFilter?: {
     qtyStep?: string;
     minOrderQty?: string;
@@ -385,6 +391,44 @@ export async function fetchLinearMarketSnapshot(symbolInput: string): Promise<Sp
   return snapshot;
 }
 
+export async function fetchTradFiGoldMarketCandidates(limit = 12): Promise<SpotMarketCandidate[]> {
+  // TradFi perpetuals are exposed through V5 category=linear. Discover the gold
+  // symbol from instrument metadata instead of hard-coding a broker display name
+  // such as XAUUSD+ (that name belongs to the separate CFD/MT5 product).
+  const instruments = await bybitPublicGet<LinearInstrumentResult>('/v5/market/instruments-info', {
+    category: 'linear',
+    limit: 1000,
+  });
+  const goldSymbols = new Set(
+    (instruments?.list || [])
+      .filter((item) => item.status === 'Trading')
+      .filter((item) => (item.settleCoin || item.quoteCoin || '').toUpperCase() === 'USDT')
+      .filter((item) => {
+        const haystack = [item.symbol, item.baseCoin, item.fullName, item.underlyingTicker]
+          .filter(Boolean)
+          .join(' ')
+          .toUpperCase();
+        return haystack.includes('XAU') || haystack.includes('GOLD');
+      })
+      .map((item) => item.symbol.toUpperCase())
+  );
+  if (goldSymbols.size === 0) return [];
+
+  const tickers = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'linear' });
+  return (tickers?.list || [])
+    .filter((ticker) => goldSymbols.has(ticker.symbol.toUpperCase()))
+    .map((ticker) => {
+      const snapshot = tickerToSnapshot(ticker);
+      if (!snapshot || snapshot.bid <= 0 || snapshot.ask <= 0) return null;
+      const spreadPct = ((snapshot.ask - snapshot.bid) / snapshot.lastPrice) * 100;
+      return { ...snapshot, spreadPct } as SpotMarketCandidate;
+    })
+    .filter((item): item is SpotMarketCandidate => item !== null)
+    .filter((item) => item.spreadPct >= 0 && item.spreadPct <= 0.20)
+    .sort((a, b) => a.spreadPct - b.spreadPct)
+    .slice(0, Math.max(1, Math.min(20, limit)));
+}
+
 export async function fetchLinearUsdtMarketCandidates(limit = 120): Promise<SpotMarketCandidate[]> {
   const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'linear' });
   return (result?.list || [])
@@ -420,7 +464,8 @@ export async function setLinearLeverage(
   } catch (e: unknown) {
     // Bybit may return an error when leverage is already set to this value.
     const message = e instanceof Error ? e.message.toLowerCase() : '';
-    if (!message.includes('not modified') && !message.includes('same leverage')) throw e;
+    const portfolioMarginOwnsLeverage = message.includes('pm mode') && message.includes('cannot set leverage');
+    if (!message.includes('not modified') && !message.includes('same leverage') && !portfolioMarginOwnsLeverage) throw e;
   }
 }
 
