@@ -13,6 +13,7 @@ import { SettingsScreen } from '../screens/SettingsScreen';
 import { SetupScreen } from '../screens/SetupScreen';
 import { SmartScoreScreen } from '../screens/SmartScoreScreen';
 import { TradeScreen } from '../screens/TradeScreen';
+import { Mt5Screen } from '../screens/Mt5Screen';
 import { loadMaxOrderUsdt, saveMaxOrderUsdt } from '../services/tradingPreferences';
 
 const Tab = createBottomTabNavigator();
@@ -40,6 +41,7 @@ export const AppNavigator: React.FC = () => {
       <Tab.Screen name="Analysis" options={{ tabBarLabel: 'Analiza', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🔎</Text> }}>{({ navigation }) => <AnalysisScreen onUseSymbol={(nextSymbol) => { setSelectedTradeSymbol(nextSymbol); setSmartSeed(null); navigation.navigate('Trade'); }} />}</Tab.Screen>
       <Tab.Screen name="Score" options={{ tabBarLabel: 'Score', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🎯</Text> }}>{({ navigation }) => <SmartScoreScreen onUseSymbol={(nextSymbol) => { setSelectedTradeSymbol(nextSymbol); setSmartSeed(null); navigation.navigate('Trade'); }} />}</Tab.Screen>
       <Tab.Screen name="Report" options={{ tabBarLabel: 'Raport', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🧾</Text> }}>{() => <ReportScreen credentials={credentials} />}</Tab.Screen>
+      <Tab.Screen name="MT5" options={{ tabBarLabel: 'MT5', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🟡</Text> }}>{() => <Mt5Screen />}</Tab.Screen>
       <Tab.Screen name="Settings" options={{ tabBarLabel: 'Ustaw.', tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚙️</Text> }}>{() => <SettingsScreen credentials={credentials} connectionState={connectionState} autoRefreshInterval={autoRefreshInterval} maxOrderUsdt={maxOrderUsdt} onSetAutoRefreshInterval={setAutoRefreshInterval} onSetMaxOrderUsdt={updateMaxOrder} onUpdateCredentials={async (key, secret) => await connect(key, secret, true)} onTestConnection={testConnection} onDisconnect={disconnect} />}</Tab.Screen>
     </Tab.Navigator>
   </NavigationContainer>;
