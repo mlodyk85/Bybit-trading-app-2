@@ -39,12 +39,126 @@ input double InpDailyLossLimit       = 5.00;
 input double InpMaxEquityDrawdownPct = 4.0;
 input int    InpDeviationPoints      = 50;
 
+input bool   InpBridgeEnabled        = false;
+input string InpBridgeUrl            = "http://127.0.0.1:8787";
+input string InpBridgeToken          = "";
+input int    InpBridgePollSeconds    = 3;
+input int    InpBridgeStatusSeconds  = 5;
+
 int hEMA=INVALID_HANDLE, hRSI=INVALID_HANDLE, hATR=INVALID_HANDLE;
 datetime lastBarTime=0, lastEntryTime=0, currentDayStart=0;
 double dayPeakEquity=0.0;
 bool dayLocked=false;
+bool remoteTradingEnabled=true;
+datetime lastBridgePoll=0, lastBridgeStatus=0;
+string lastAction="INIT";
 
 string TradeSymbol(){ return StringLen(InpSymbol)>0 ? InpSymbol : _Symbol; }
+
+string TrimSlash(string value)
+{
+   while(StringLen(value)>0 && StringSubstr(value,StringLen(value)-1,1)=="/")
+      value=StringSubstr(value,0,StringLen(value)-1);
+   return value;
+}
+
+string BridgeHeaders()
+{
+   return "Content-Type: application/json\r\nX-Bridge-Token: "+InpBridgeToken+"\r\n";
+}
+
+bool BridgeRequest(const string method,const string path,const string body,string &response)
+{
+   response="";
+   if(!InpBridgeEnabled || StringLen(InpBridgeUrl)==0 || StringLen(InpBridgeToken)==0)
+      return false;
+
+   string url=TrimSlash(InpBridgeUrl)+path;
+   char data[];
+   if(StringLen(body)>0)
+   {
+      StringToCharArray(body,data,0,WHOLE_ARRAY,CP_UTF8);
+      if(ArraySize(data)>0) ArrayResize(data,ArraySize(data)-1);
+   }
+   char result[];
+   string resultHeaders="";
+   ResetLastError();
+   int code=WebRequest(method,url,BridgeHeaders(),5000,data,result,resultHeaders);
+   if(code<0)
+   {
+      PrintFormat("MT5 BRIDGE: WebRequest failed err=%d. Add %s to MT5 WebRequest allow-list.",GetLastError(),InpBridgeUrl);
+      return false;
+   }
+   response=CharArrayToString(result,0,-1,CP_UTF8);
+   return code>=200 && code<300;
+}
+
+void SendBridgeStatus(const string symbol)
+{
+   if(!InpBridgeEnabled) return;
+   datetime now=TimeCurrent();
+   if(lastBridgeStatus>0 && (now-lastBridgeStatus)<MathMax(1,InpBridgeStatusSeconds)) return;
+   lastBridgeStatus=now;
+
+   MqlTick tick;
+   SymbolInfoTick(symbol,tick);
+   string enabled=remoteTradingEnabled ? "true" : "false";
+   string locked=dayLocked ? "true" : "false";
+   string agentId=StringFormat("%I64u-%s",InpMagic,symbol);
+
+   string body=StringFormat(
+      "{\"agentId\":\"%s\",\"symbol\":\"%s\",\"enabled\":%s,\"dayLocked\":%s,\"equity\":%.2f,\"balance\":%.2f,\"freeMargin\":%.2f,\"margin\":%.2f,\"dailyRealized\":%.2f,\"basketPnl\":%.2f,\"positions\":%d,\"maxPositions\":%d,\"bid\":%.5f,\"ask\":%.5f,\"lastAction\":\"%s\"}",
+      agentId,symbol,enabled,locked,
+      AccountInfoDouble(ACCOUNT_EQUITY),
+      AccountInfoDouble(ACCOUNT_BALANCE),
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+      AccountInfoDouble(ACCOUNT_MARGIN),
+      TodayClosedPnl(),BasketProfit(symbol),
+      ManagedPositions(symbol),InpMaxPositions,tick.bid,tick.ask,lastAction
+   );
+
+   string response="";
+   BridgeRequest("POST","/mt5/status",body,response);
+}
+
+void ProcessBridgeCommands(const string symbol)
+{
+   if(!InpBridgeEnabled) return;
+   datetime now=TimeCurrent();
+   if(lastBridgePoll>0 && (now-lastBridgePoll)<MathMax(1,InpBridgePollSeconds)) return;
+   lastBridgePoll=now;
+
+   string response="";
+   if(!BridgeRequest("GET","/mt5/next-command","",response)) return;
+   StringTrimLeft(response);
+   StringTrimRight(response);
+   StringToUpper(response);
+
+   if(response=="START")
+   {
+      remoteTradingEnabled=true;
+      lastAction="REMOTE START";
+      Print("MT5 BRIDGE: START");
+   }
+   else if(response=="STOP")
+   {
+      remoteTradingEnabled=false;
+      lastAction="REMOTE STOP";
+      Print("MT5 BRIDGE: STOP new entries");
+   }
+   else if(response=="CLOSE_ALL")
+   {
+      CloseAllManaged(symbol,"REMOTE CLOSE_ALL");
+      lastAction="REMOTE CLOSE_ALL";
+   }
+   else if(response=="RESET_DAY_LOCK")
+   {
+      dayLocked=false;
+      dayPeakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+      lastAction="REMOTE RESET_DAY_LOCK";
+      Print("MT5 BRIDGE: RESET_DAY_LOCK");
+   }
+}
 
 datetime DayStart(datetime t)
 {
@@ -302,6 +416,8 @@ int OnInit()
    dayLocked=false;
 
    Print("MT5 CAPITAL ROTATION GOLD initialized on ",symbol);
+   if(InpBridgeEnabled)
+      Print("MT5 BRIDGE enabled: add ",InpBridgeUrl," to Tools -> Options -> Expert Advisors -> Allow WebRequest.");
    return INIT_SUCCEEDED;
 }
 
@@ -317,6 +433,8 @@ void OnTick()
 {
    string symbol=TradeSymbol();
    ResetDayIfNeeded();
+   ProcessBridgeCommands(symbol);
+   SendBridgeStatus(symbol);
 
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    if(equity>dayPeakEquity) dayPeakEquity=equity;
@@ -326,8 +444,16 @@ void OnTick()
 
    if(ManagedPositions(symbol)>0)
    {
-      if(basketPnl>=InpBasketProfitTarget) CloseAllManaged(symbol,"BASKET PROFIT TARGET");
-      else if(basketPnl<=-MathAbs(InpBasketLossLimit)) CloseAllManaged(symbol,"BASKET LOSS LIMIT");
+      if(basketPnl>=InpBasketProfitTarget)
+      {
+         CloseAllManaged(symbol,"BASKET PROFIT TARGET");
+         lastAction="BASKET TP";
+      }
+      else if(basketPnl<=-MathAbs(InpBasketLossLimit))
+      {
+         CloseAllManaged(symbol,"BASKET LOSS LIMIT");
+         lastAction="BASKET SL";
+      }
    }
 
    if(dayPnl>=InpDailyProfitTarget) dayLocked=true;
@@ -349,7 +475,7 @@ void OnTick()
    }
 
    UpdateStatus(symbol);
-   if(dayLocked) return;
+   if(dayLocked || !remoteTradingEnabled) return;
 
    datetime barTime=iTime(symbol,InpSignalTF,0);
    if(barTime<=0 || barTime==lastBarTime) return;
@@ -374,6 +500,7 @@ void OnTick()
          (direction<0 && basketDir!=POSITION_TYPE_SELL)) return;
    }
 
-   OpenPosition(symbol,direction,atrValue);
+   if(OpenPosition(symbol,direction,atrValue))
+      lastAction= direction>0 ? "OPEN LONG" : "OPEN SHORT";
 }
 //+------------------------------------------------------------------+
