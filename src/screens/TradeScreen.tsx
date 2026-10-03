@@ -22,7 +22,6 @@ import {
   cancelSpotOrder,
   fetchLinearPositions,
   fetchLinearUsdtMarketCandidates,
-  fetchTradFiGoldMarketCandidates,
   fetchTradFiGoldScalpSignal,
   closeLinearPositionMarket,
   placeLinearMarketOrderByMargin,
