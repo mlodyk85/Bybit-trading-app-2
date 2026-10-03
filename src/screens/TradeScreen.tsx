@@ -23,6 +23,7 @@ import {
   fetchLinearPositions,
   fetchLinearUsdtMarketCandidates,
   fetchTradFiGoldMarketCandidates,
+  fetchTradFiGoldScalpSignal,
   closeLinearPositionMarket,
   placeLinearMarketOrderByMargin,
   fetchSpotExecutions,
@@ -66,6 +67,8 @@ interface SmartCandidateScore {
   regime: MarketRegime;
   strategy: EntryStrategy;
   volatilityPct: number;
+  signalSide?: 'Buy' | 'Sell';
+  signalReason?: string;
 }
 
 interface TrackedPosition {
@@ -465,6 +468,35 @@ export const TradeScreen: React.FC<Props> = ({
 
   const scanBestCandidate = async (): Promise<SmartCandidateScore | null> => {
     const scanNo = scanCountRef.current + 1;
+
+    if (smartMode === 'gold') {
+      setSmartStatus(`GOLD SCALPER: analizuję XAUUSDT na 1m / 5m / 15m...`);
+      const signal = await fetchTradFiGoldScalpSignal();
+      scanCountRef.current = scanNo;
+      setScanCount(scanNo);
+      if (!signal) {
+        setActiveScore(null);
+        setScanInfo('GOLD: brak zgodnego sygnału 1m/5m/15m — nie otwieram pozycji.');
+        return null;
+      }
+
+      const scored: SmartCandidateScore = {
+        market: signal.candidate,
+        windowMomentumPct: signal.momentum5mPct,
+        shortMomentumPct: signal.momentum1mPct,
+        score: Math.abs(signal.momentum1mPct) * 200 + Math.abs(signal.momentum5mPct) * 80,
+        regime: signal.side === 'Buy' ? 'TREND_UP' : 'TREND_DOWN',
+        strategy: 'MOMENTUM_BREAKOUT',
+        volatilityPct: signal.atrPct1m,
+        signalSide: signal.side,
+        signalReason: signal.reason,
+      };
+      setActiveScore(scored);
+      setScanInfo(
+        `GOLD ${signal.side === 'Buy' ? 'LONG' : 'SHORT'} XAUUSDT • RSI1m ${signal.rsi1m.toFixed(1)} • mom1m ${signal.momentum1mPct >= 0 ? '+' : ''}${signal.momentum1mPct.toFixed(3)}% • mom5m ${signal.momentum5mPct >= 0 ? '+' : ''}${signal.momentum5mPct.toFixed(3)}% • ATR1m ${signal.atrPct1m.toFixed(3)}% • spread ${signal.candidate.spreadPct.toFixed(3)}%`
+      );
+      return scored;
+    }
     const fastMode = smartMode === 'aggressive' || smartMode === 'rotation' || smartMode === 'basket' || smartMode === 'gold';
     const scanSamples = fastMode ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
     const scanIntervalMs = fastMode ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
@@ -828,14 +860,15 @@ export const TradeScreen: React.FC<Props> = ({
     if (futuresBasketSymbolsRef.current.length >= FUTURES_BASKET_MAX_SLOTS) return false;
 
     // Momentum determines direction: confirmed positive impulse = LONG, negative impulse = SHORT.
-    const side: 'Buy' | 'Sell' = candidate.shortMomentumPct >= 0 ? 'Buy' : 'Sell';
-    setSmartStatus(`FUTURES BASKET: otwieram ${side === 'Buy' ? 'LONG' : 'SHORT'} ${symbol} • margin ${marginUsdt.toFixed(2)} USDT • ${leverage.toFixed(1)}x...`);
+    const side: 'Buy' | 'Sell' = candidate.signalSide || (candidate.shortMomentumPct >= 0 ? 'Buy' : 'Sell');
+    const futuresModeName = smartMode === 'gold' ? 'GOLD SCALPER' : 'FUTURES BASKET';
+    setSmartStatus(`${futuresModeName}: otwieram ${side === 'Buy' ? 'LONG' : 'SHORT'} ${symbol} • margin ${marginUsdt.toFixed(2)} USDT • ${leverage.toFixed(1)}x...`);
     try {
       await placeLinearMarketOrderByMargin(credentials, symbol, side, marginUsdt, leverage);
       futuresBasketSymbolsRef.current = [...futuresBasketSymbolsRef.current, symbol];
       await sleep(900);
       await refreshFuturesBasketPositions();
-      setSmartStatus(`FUTURES BASKET: ${side === 'Buy' ? 'LONG' : 'SHORT'} ${symbol} otwarty. Koszyk ${futuresBasketSymbolsRef.current.length}/${FUTURES_BASKET_MAX_SLOTS}.`);
+      setSmartStatus(`${futuresModeName}: ${side === 'Buy' ? 'LONG' : 'SHORT'} ${symbol} otwarty${candidate.signalReason ? ` • ${candidate.signalReason}` : ''}.`);
       return true;
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'błąd futures';
@@ -1474,7 +1507,7 @@ export const TradeScreen: React.FC<Props> = ({
     const loss = toNumber(maxLoss);
     const cycles = Math.floor(toNumber(maxCycles));
     const requestedSlots = Math.floor(toNumber(maxSlots)) || 1;
-    const slots = Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'rotation' ? ROTATION_MAX_SLOTS : smartMode === 'basket' ? FUTURES_BASKET_MAX_SLOTS : 3, requestedSlots));
+    const slots = smartMode === 'gold' ? 1 : Math.max(1, Math.min(smartMode === 'aggressive' ? AGGRESSIVE_MAX_SLOTS : smartMode === 'rotation' ? ROTATION_MAX_SLOTS : smartMode === 'basket' ? FUTURES_BASKET_MAX_SLOTS : 3, requestedSlots));
     const virtualCapital = toNumber(shadowCapital);
     const basketTargetValue = toNumber(basketTarget);
     const basketMaxLossValue = toNumber(basketMaxLoss);
@@ -1778,7 +1811,7 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.capitalHint}>Jeśli wpiszesz więcej niż globalny limit lub wolne saldo, tryb automatycznie użyje maksymalnej dostępnej kwoty. Globalny limit: {maxOrderUsdt.toFixed(2)} USDT.</Text>
             </>}
             {(smartMode === 'basket' || smartMode === 'gold') && <>
-              <Text style={styles.aggressiveNotice}>{smartMode === 'gold' ? 'GOLD SCALPER — TradFi GOLD PERPETUAL: automatycznie wykrywa kontrakt złota z metadanych Bybit V5, handluje LONG/SHORT według krótkiego momentum i po zamknięciu od razu szuka kolejnego wejścia. Jeden slot ogranicza kumulację ryzyka.' : 'FUTURES BASKET — USDT PERPETUAL:'} otwiera LONG lub SHORT zależnie od krótkiego momentum. Każda pozycja używa ustawionego marginu i dźwigni. Cały koszyk jest zamykany reduce-only po osiągnięciu wspólnego TP albo SL.</Text>
+              <Text style={styles.aggressiveNotice}>{smartMode === 'gold' ? 'GOLD SCALPER — XAUUSDT 24/7: sygnał nie jest już oparty na kilku tickach. Bot analizuje 1m + 5m + 15m, EMA, RSI, ATR i spread; otwiera LONG/SHORT tylko gdy kierunek jest zgodny na kilku interwałach. Zawsze tylko 1 pozycja.' : 'FUTURES BASKET — USDT PERPETUAL:'} otwiera LONG lub SHORT zależnie od krótkiego momentum. Każda pozycja używa ustawionego marginu i dźwigni. Cały koszyk jest zamykany reduce-only po osiągnięciu wspólnego TP albo SL.</Text>
               <Text style={styles.smallLabel}>Margin na jedną pozycję FUTURES</Text>
               <TextInput value={basketCapital} onChangeText={setBasketCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.smallLabel}>Dźwignia FUTURES (1x–5x testowo)</Text>
