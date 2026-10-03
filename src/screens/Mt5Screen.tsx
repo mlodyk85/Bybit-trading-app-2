@@ -89,11 +89,17 @@ export const Mt5Screen: React.FC = () => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>MT5</Text>
-      <Text style={styles.subtitle}>Capital Rotation Gold • osobny silnik MetaTrader 5</Text>
+      <Text style={styles.subtitle}>Bybit MT5 CFD • Capital Rotation Gold</Text>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>MT5 Bridge</Text>
-        <Text style={styles.hint}>Telefon steruje EA przez Bridge uruchomiony na VPS/PC obok terminala MT5. W MT5 trzeba dodać adres Bridge do Tools → Options → Expert Advisors → Allow WebRequest.</Text>
+        <Text style={styles.cardTitle}>Ważne: dwa różne produkty Bybit</Text>
+        <Text style={styles.hint}>MT5 na tym ekranie = Bybit MT5 CFD Account i Expert Advisor uruchomiony w terminalu MetaTrader 5.</Text>
+        <Text style={styles.hint}>GOLD SCALPER w zakładce Trade = natywny Bybit XAUUSDT TradFi Perpetual 24/7. To nie jest MT5 CFD i działa bez Bridge.</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Bybit MT5 CFD Bridge</Text>
+        <Text style={styles.hint}>Ten moduł jest przeznaczony do konta Bybit MT5 CFD. Telefon steruje naszym EA przez Bridge uruchomiony na MacBooku/VPS obok terminala MetaTrader 5. Nie potrzebujesz zewnętrznego brokera ani osobnego loginu poza danymi MT5 udostępnionymi przez Bybit. W MT5 dodaj adres Bridge do Tools → Options → Expert Advisors → Allow WebRequest.</Text>
         <Text style={styles.label}>Adres Bridge</Text>
         <TextInput style={styles.input} value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} placeholder="http://192.168.1.10:8787" placeholderTextColor="#666" />
         <Text style={styles.label}>Token Bridge</Text>
@@ -125,7 +131,7 @@ export const Mt5Screen: React.FC = () => {
             <Text style={styles.hint}>Pozycje: {status.positions}/{status.maxPositions} • ostatnia aktualizacja: {new Date(status.updatedAt).toLocaleTimeString()}</Text>
             {!!status.lastAction && <Text style={styles.hint}>Ostatnia akcja: {status.lastAction}</Text>}
           </>
-        ) : <Text style={styles.hint}>EA jeszcze nie wysłał statusu do Bridge.</Text>}
+        ) : <Text style={styles.hint}>EA z Bybit MT5 CFD jeszcze nie wysłał statusu do Bridge.</Text>}
       </View>
 
       <View style={styles.card}>
