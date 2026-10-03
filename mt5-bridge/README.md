@@ -1,6 +1,6 @@
 # MT5 Bridge
 
-Small dependency-free Node.js service between the Android app and the MT5 Expert Advisor.
+Small dependency-free Node.js service between the Android app and the Expert Advisor running on a **Bybit MT5 CFD Account**.
 
 ## Run locally / on VPS
 
@@ -46,4 +46,4 @@ The app can:
 
 The Bridge token is required on both MT5 and mobile requests. Do not expose port 8787 publicly without firewall/VPN/reverse-proxy protection. For remote internet access, place the Bridge behind HTTPS or a VPN such as Tailscale/WireGuard.
 
-The Bridge intentionally does not store broker login/password and does not need MT5 account credentials.
+The Bridge intentionally does not store Bybit MT5 login/password and does not need MT5 account credentials. Authentication to the trading account stays inside MetaTrader 5.
