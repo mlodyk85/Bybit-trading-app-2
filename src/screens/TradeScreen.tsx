@@ -497,17 +497,17 @@ export const TradeScreen: React.FC<Props> = ({
       );
       return scored;
     }
-    const fastMode = smartMode === 'aggressive' || smartMode === 'rotation' || smartMode === 'basket' || smartMode === 'gold';
+    const fastMode = smartMode === 'aggressive' || smartMode === 'rotation' || smartMode === 'basket';
     const scanSamples = fastMode ? AGGRESSIVE_SCAN_SAMPLES : SCAN_SAMPLES;
     const scanIntervalMs = fastMode ? AGGRESSIVE_SCAN_INTERVAL_MS : SCAN_INTERVAL_MS;
-    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'rotation' ? ' • CAPITAL ROTATION' : smartMode === 'basket' ? ' • FUTURES BASKET' : smartMode === 'gold' ? ' • GOLD SCALPER' : '';
+    const modeLabel = smartMode === 'aggressive' ? ' • AGGRESSIVE' : smartMode === 'rotation' ? ' • CAPITAL ROTATION' : smartMode === 'basket' ? ' • FUTURES BASKET' : '';
     setSmartStatus(`Skan ${scanNo}: zbieram ${scanSamples} próbek rynku${modeLabel}...`);
     const tracks = new Map<string, SpotMarketCandidate[]>();
     let latest: SpotMarketCandidate[] = [];
 
     for (let sample = 0; sample < scanSamples; sample += 1) {
       if (stopRef.current) return null;
-      latest = smartMode === 'gold' ? await fetchTradFiGoldMarketCandidates(12) : smartMode === 'basket' ? await fetchLinearUsdtMarketCandidates(160) : await fetchSpotUsdtMarketCandidates(240);
+      latest = smartMode === 'basket' ? await fetchLinearUsdtMarketCandidates(160) : await fetchSpotUsdtMarketCandidates(240);
       for (const item of latest) {
         const history = tracks.get(item.symbol) || [];
         history.push(item);
@@ -524,7 +524,7 @@ export const TradeScreen: React.FC<Props> = ({
 
     for (const now of latest) {
       // Spot modes never trade strategic CORE. FUTURES BASKET uses independent linear positions.
-      if (smartMode !== 'basket' && smartMode !== 'gold' && STRATEGIC_CORE_SYMBOLS.has(now.symbol)) continue;
+      if (smartMode !== 'basket' && STRATEGIC_CORE_SYMBOLS.has(now.symbol)) continue;
       const history = tracks.get(now.symbol) || [];
       if (history.length < 4) continue;
       const first = history[0];
@@ -559,10 +559,10 @@ export const TradeScreen: React.FC<Props> = ({
         }))
         .sort((a, b) => b.score - a.score);
       best = rotationRows[0] || null;
-    } else if (smartMode === 'aggressive' || smartMode === 'basket' || smartMode === 'gold') {
+    } else if (smartMode === 'aggressive' || smartMode === 'basket') {
       // AGGRESSIVE/FUTURES BASKET use a permissive short-term momentum ranking.
       const aggressiveRows = adaptiveRows
-        .filter((row) => row.market.turnover24h >= (smartMode === 'basket' ? 5_000_000 : smartMode === 'gold' ? 0 : 250_000) && row.market.spreadPct >= 0 && row.market.spreadPct <= (smartMode === 'basket' ? 0.12 : smartMode === 'gold' ? 0.20 : 0.45))
+        .filter((row) => row.market.turnover24h >= (smartMode === 'basket' ? 5_000_000 : 250_000) && row.market.spreadPct >= 0 && row.market.spreadPct <= (smartMode === 'basket' ? 0.12 : 0.45))
         .filter((row) => row.shortMomentumPct >= -0.01 || row.windowMomentumPct <= -0.02)
         .map((row) => ({
           ...row,
