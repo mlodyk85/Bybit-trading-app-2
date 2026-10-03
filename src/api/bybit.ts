@@ -429,6 +429,154 @@ export async function fetchTradFiGoldMarketCandidates(limit = 12): Promise<SpotM
     .slice(0, Math.max(1, Math.min(20, limit)));
 }
 
+interface LinearKlineResult {
+  category: string;
+  symbol: string;
+  list: string[][];
+}
+
+export interface GoldScalpSignal {
+  candidate: SpotMarketCandidate;
+  side: 'Buy' | 'Sell';
+  rsi1m: number;
+  emaFast1m: number;
+  emaSlow1m: number;
+  emaFast5m: number;
+  emaSlow5m: number;
+  emaTrend15m: number;
+  atrPct1m: number;
+  momentum1mPct: number;
+  momentum5mPct: number;
+  reason: string;
+}
+
+async function fetchLinearCloses(symbolInput: string, interval: '1' | '5' | '15', limit: number): Promise<Array<{ high: number; low: number; close: number }>> {
+  const symbol = symbolInput.trim().toUpperCase();
+  const result = await bybitPublicGet<LinearKlineResult>('/v5/market/kline', {
+    category: 'linear',
+    symbol,
+    interval,
+    limit: Math.max(30, Math.min(200, limit)),
+  });
+  // Bybit returns newest first. Indicators below expect oldest -> newest.
+  return (result?.list || [])
+    .map((row) => ({
+      high: Number(row[2] || 0),
+      low: Number(row[3] || 0),
+      close: Number(row[4] || 0),
+    }))
+    .filter((row) => row.high > 0 && row.low > 0 && row.close > 0)
+    .reverse();
+}
+
+function ema(values: number[], period: number): number {
+  if (values.length === 0) return 0;
+  const k = 2 / (period + 1);
+  let value = values[0];
+  for (let i = 1; i < values.length; i += 1) value = values[i] * k + value * (1 - k);
+  return value;
+}
+
+function rsi(values: number[], period = 14): number {
+  if (values.length <= period) return 50;
+  let gains = 0;
+  let losses = 0;
+  const start = Math.max(1, values.length - period);
+  for (let i = start; i < values.length; i += 1) {
+    const diff = values[i] - values[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses += -diff;
+  }
+  if (losses <= 1e-12) return 100;
+  const rs = (gains / period) / (losses / period);
+  return 100 - (100 / (1 + rs));
+}
+
+function atrPct(rows: Array<{ high: number; low: number; close: number }>, period = 14): number {
+  if (rows.length <= 1) return 0;
+  const trs: number[] = [];
+  for (let i = 1; i < rows.length; i += 1) {
+    const prevClose = rows[i - 1].close;
+    const row = rows[i];
+    trs.push(Math.max(row.high - row.low, Math.abs(row.high - prevClose), Math.abs(row.low - prevClose)));
+  }
+  const slice = trs.slice(-period);
+  const atr = slice.length ? slice.reduce((sum, value) => sum + value, 0) / slice.length : 0;
+  const last = rows[rows.length - 1]?.close || 0;
+  return last > 0 ? atr / last * 100 : 0;
+}
+
+export async function fetchTradFiGoldScalpSignal(): Promise<GoldScalpSignal | null> {
+  const candidates = await fetchTradFiGoldMarketCandidates(12);
+  // Prefer the exact Bybit 24/7 TradFi contract visible in the app, otherwise use discovered GOLD/XAU.
+  const candidate = candidates.find((item) => item.symbol.toUpperCase() === 'XAUUSDT') || candidates[0];
+  if (!candidate) return null;
+
+  const symbol = candidate.symbol.toUpperCase();
+  const [rows1m, rows5m, rows15m] = await Promise.all([
+    fetchLinearCloses(symbol, '1', 80),
+    fetchLinearCloses(symbol, '5', 80),
+    fetchLinearCloses(symbol, '15', 80),
+  ]);
+  if (rows1m.length < 30 || rows5m.length < 30 || rows15m.length < 30) return null;
+
+  const close1 = rows1m.map((row) => row.close);
+  const close5 = rows5m.map((row) => row.close);
+  const close15 = rows15m.map((row) => row.close);
+  const last = close1[close1.length - 1];
+  const emaFast1m = ema(close1.slice(-40), 7);
+  const emaSlow1m = ema(close1.slice(-60), 20);
+  const emaFast5m = ema(close5.slice(-50), 9);
+  const emaSlow5m = ema(close5.slice(-70), 21);
+  const emaTrend15m = ema(close15.slice(-60), 20);
+  const rsi1m = rsi(close1, 14);
+  const atrPct1m = atrPct(rows1m, 14);
+  const momentum1mPct = close1.length >= 4 ? (last - close1[close1.length - 4]) / close1[close1.length - 4] * 100 : 0;
+  const last5 = close5[close5.length - 1];
+  const momentum5mPct = close5.length >= 3 ? (last5 - close5[close5.length - 3]) / close5[close5.length - 3] * 100 : 0;
+
+  // Scalping entry needs alignment across 1m, 5m and 15m. This prevents a single noisy tick
+  // from flipping LONG/SHORT, which was the weakness of the previous GOLD mode.
+  const longAligned = last > emaFast1m
+    && emaFast1m > emaSlow1m
+    && emaFast5m > emaSlow5m
+    && last5 > emaTrend15m
+    && momentum1mPct > 0
+    && momentum5mPct >= -0.03
+    && rsi1m >= 52 && rsi1m <= 72;
+
+  const shortAligned = last < emaFast1m
+    && emaFast1m < emaSlow1m
+    && emaFast5m < emaSlow5m
+    && last5 < emaTrend15m
+    && momentum1mPct < 0
+    && momentum5mPct <= 0.03
+    && rsi1m <= 48 && rsi1m >= 28;
+
+  // Skip dead/noisy markets: expected 1m volatility must be materially larger than spread.
+  const enoughRange = atrPct1m >= Math.max(0.015, candidate.spreadPct * 2.5);
+  if (!enoughRange || (!longAligned && !shortAligned)) return null;
+
+  const side: 'Buy' | 'Sell' = longAligned ? 'Buy' : 'Sell';
+  return {
+    candidate,
+    side,
+    rsi1m,
+    emaFast1m,
+    emaSlow1m,
+    emaFast5m,
+    emaSlow5m,
+    emaTrend15m,
+    atrPct1m,
+    momentum1mPct,
+    momentum5mPct,
+    reason: side === 'Buy'
+      ? 'LONG: 1m/5m/15m trend aligned + positive 1m momentum'
+      : 'SHORT: 1m/5m/15m trend aligned + negative 1m momentum',
+  };
+}
+
+
 export async function fetchLinearUsdtMarketCandidates(limit = 120): Promise<SpotMarketCandidate[]> {
   const result = await bybitPublicGet<SpotTickerResult>('/v5/market/tickers', { category: 'linear' });
   return (result?.list || [])
