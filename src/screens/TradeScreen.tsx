@@ -174,7 +174,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [pairsLoading, setPairsLoading] = useState(true);
   const [market, setMarket] = useState<SpotMarketSnapshot | null>(null);
 
-  const [smartMode, setSmartMode] = useState<SmartMode>('assist');
+  const [smartMode, setSmartMode] = useState<SmartMode>('off');
   const [smartRunning, setSmartRunning] = useState(false); // Happy Hour engine
   const [accumulationRunning, setAccumulationRunning] = useState(false); // Smart engine
   const [accumulationStatus, setAccumulationStatus] = useState('Gotowy');
@@ -1732,7 +1732,9 @@ export const TradeScreen: React.FC<Props> = ({
       // A stored RUN request survives screen/app recreation. We resume automatically;
       // only the explicit STOP buttons clear these flags.
       if (state.smart && !accumulationRunning) startAccumulationEngine(true);
-      if (state.happyHour && !smartRunningRef.current) startSmart(true);
+      // Legacy live modes no longer auto-resume after app recreation/update.
+      // The 24/7 PRO Engine is the preferred execution path; legacy modes require an explicit START.
+      if (state.happyHour) void setTradingRunRequested('happy-hour', false);
     }).catch(() => undefined);
     return () => { mounted = false; };
     // Restore once for this screen instance; engines manage their own continuous loops.
@@ -1747,6 +1749,7 @@ export const TradeScreen: React.FC<Props> = ({
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>Trading Spot</Text>
         <Text style={styles.subtitle}>Bybit Spot • ręczny handel + Smart Auto</Text>
+        <View style={styles.legacyBanner}><Text style={styles.legacyBannerTitle}>PRO ENGINE = główny tryb 24/7</Text><Text style={styles.legacyBannerText}>Tryby poniżej są LEGACY/TEST i nie uruchamiają się już automatycznie po restarcie. Do ciągłej rotacji kapitału używaj zakładki PRO.</Text></View>
 
         <View style={styles.quoteCard}>
           <View style={styles.quoteTop}>
@@ -1995,4 +1998,7 @@ const styles = StyleSheet.create({
   pairRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#333333', flexDirection: 'row', justifyContent: 'space-between' },
   pairRowText: { color: '#FFFFFF', fontWeight: '700' },
   check: { color: '#F0B90B', fontWeight: '900' },
+  legacyBanner: { backgroundColor: '#17210F', borderWidth: 1, borderColor: '#84CC16', borderRadius: 8, padding: 10, marginBottom: 12 },
+  legacyBannerTitle: { color: '#A3E635', fontSize: 12, fontWeight: '900', marginBottom: 3 },
+  legacyBannerText: { color: '#C7D2B5', fontSize: 11, lineHeight: 16 },
 });
