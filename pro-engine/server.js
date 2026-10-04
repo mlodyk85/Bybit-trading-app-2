@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-var-requires */
 const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -422,7 +423,7 @@ async function openPosition(sig, account) {
 
 async function marketClose(position, reason) {
   if (position.exitOrderId) {
-    try { await cancelOrder(position.symbol, position.exitOrderId); } catch {}
+    try { await cancelOrder(position.symbol, position.exitOrderId); } catch { /* best-effort cleanup */ }
     position.exitOrderId = null;
   }
   const r = await instrument(position.symbol);
@@ -514,7 +515,7 @@ async function reconcilePositions() {
     // lower the maker target so capital rotates instead of sitting idle for days.
     if (ageH >= 4 && estNet >= Math.max(0.06, position.costUsdt * 0.0015)) {
       if (position.exitOrderId) {
-        try { await cancelOrder(position.symbol, position.exitOrderId); } catch {}
+        try { await cancelOrder(position.symbol, position.exitOrderId); } catch { /* best-effort cleanup */ }
         position.exitOrderId = null;
       }
       const recoveryPct = clamp((fee.taker + fee.maker) * 100 + 0.12, 0.24, 0.45);
@@ -615,10 +616,10 @@ function wsConnect() {
         const ask = Number(d.a?.[0]?.[0] || prev.ask || 0);
         market.set(symbol, { ...prev, symbol, bid, ask, last: prev.last || (bid + ask) / 2, ts: Date.now() });
       }
-    } catch {}
+    } catch { /* best-effort cleanup */ }
   });
   ws.on('close', () => setTimeout(wsConnect, 1500));
-  ws.on('error', () => { try { ws.close(); } catch {} });
+  ws.on('error', () => { try { ws.close(); } catch { /* best-effort cleanup */ } });
 }
 
 async function closeAll(reason = 'REMOTE_CLOSE_ALL') {
@@ -635,7 +636,7 @@ async function closeProfitable() {
     const fee = await feeRate(p.symbol);
     const net = estimateNet(p, m.bid, fee.taker);
     if (net > 0.05) {
-      try { await marketClose(p, 'REMOTE_CLOSE_PROFITABLE'); } catch {}
+      try { await marketClose(p, 'REMOTE_CLOSE_PROFITABLE'); } catch { /* best-effort cleanup */ }
     }
   }
 }
