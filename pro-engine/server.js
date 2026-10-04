@@ -475,7 +475,6 @@ async function reconcilePositions() {
       const st = await orderState(position.symbol, position.exitOrderId).catch(() => null);
       if (st?.orderStatus === 'Filled') {
         const fill = await executions(position.symbol, position.exitOrderId);
-        const qty = fill.reduce((s, r) => s + Number(r.execQty || 0), 0);
         const quote = fill.reduce((s, r) => s + Number(r.execQty || 0) * Number(r.execPrice || 0), 0);
         const base = position.symbol.replace(/USDT$/, '');
         let feeQuote = 0;
@@ -558,7 +557,7 @@ async function engineTick() {
   loopBusy = true;
   try {
     const account = await wallet();
-    const risk = await riskGate(account);
+    await riskGate(account);
     await reconcilePositions();
 
     if (!state.running || state.dayLocked) return;
