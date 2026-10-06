@@ -13,8 +13,8 @@ import {
 import * as FileSystem from 'expo-file-system';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { fetchSpotExecutionsHistory } from '../api/bybit';
-import { ApiCredentials, SpotExecution } from '../api/types';
+import { fetchSpotExecutionsHistory, fetchWalletBalance } from '../api/bybit';
+import { ApiCredentials, SpotExecution, WalletAccountResult } from '../api/types';
 
 interface Props {
   credentials: ApiCredentials;
@@ -318,6 +318,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [exporting, setExporting] = useState<'csv' | 'pdf' | null>(null);
+  const [accountSnapshot, setAccountSnapshot] = useState<WalletAccountResult | null>(null);
 
   const load = useCallback(async (manual = false) => {
     manual ? setRefreshing(true) : setLoading(true);
@@ -325,8 +326,12 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
     try {
       const endTime = Date.now();
       const historyStart = endTime - RANGE_MS['365d'];
-      const fullHistory = await fetchSpotExecutionsHistory(credentials, historyStart, endTime, 20000);
+      const [fullHistory, wallet] = await Promise.all([
+        fetchSpotExecutionsHistory(credentials, historyStart, endTime, 20000),
+        fetchWalletBalance(credentials),
+      ]);
       setHistoryRows(fullHistory);
+      setAccountSnapshot(wallet);
       const cutoff = endTime - RANGE_MS[range];
       setRows(fullHistory.filter((item) => Number(item.execTime) >= cutoff));
     } catch (e: unknown) {
@@ -389,6 +394,37 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
           </TouchableOpacity>
         </View>
 
+        {accountSnapshot && (() => {
+          const equity = Number(accountSnapshot.totalEquity || 0);
+          const walletBalance = Number(accountSnapshot.totalWalletBalance || 0);
+          const available = Number(accountSnapshot.totalAvailableBalance || 0);
+          const perpUpl = Number(accountSnapshot.totalPerpUPL || 0);
+          const usdt = accountSnapshot.coin.find((item) => item.coin === 'USDT');
+          const freeUsdt = Math.max(
+            Number(usdt?.free || 0),
+            Number(usdt?.availableToWithdraw || 0),
+            Math.max(0, Number(usdt?.walletBalance || 0) - Math.max(0, Number(usdt?.locked || 0)))
+          );
+          const spotAssets = accountSnapshot.coin
+            .filter((item) => item.coin !== 'USDT')
+            .reduce((sum, item) => sum + Math.max(0, Number(item.usdValue || 0)), 0);
+          return (
+            <View style={styles.accountCard}>
+              <Text style={styles.accountTitle}>Stan konta TERAZ</Text>
+              <View style={styles.summaryGrid}>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>Equity</Text><Text style={styles.summaryValue}>{formatNumber(equity, 2)} USDT</Text></View>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>Wallet</Text><Text style={styles.summaryValue}>{formatNumber(walletBalance, 2)} USDT</Text></View>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>Wolne USDT</Text><Text style={styles.summaryValue}>{formatNumber(freeUsdt, 2)} USDT</Text></View>
+                <View style={styles.summaryItem}><Text style={styles.summaryLabel}>Aktywa poza USDT</Text><Text style={styles.summaryValue}>{formatNumber(spotAssets, 2)} USD</Text></View>
+              </View>
+              <Text style={[styles.summaryPnl, perpUpl >= 0 ? styles.profit : styles.loss]}>
+                Perpetual UPL: {perpUpl >= 0 ? '+' : ''}{formatNumber(perpUpl, 4)} USDT
+              </Text>
+              <Text style={styles.summaryNote}>Available balance: {formatNumber(available, 2)} USDT. Ten panel pokazuje bieżący stan konta; poniższy FIFO PnL pokazuje tylko zrealizowane wyniki zamkniętych sprzedaży Spot.</Text>
+            </View>
+          );
+        })()}
+
         <View style={styles.rangeRow}>
           {(['24h', '7d', '30d', '365d'] as ReportRange[]).map((item) => (
             <TouchableOpacity
@@ -429,9 +465,9 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
                 PnL brutto: {totalGross >= 0 ? '+' : ''}{formatNumber(totalGross, 4)} USDT
               </Text>
               <Text style={[styles.summaryPnl, totalNet >= 0 ? styles.profit : styles.loss]}>
-                PnL NETTO: {totalNet >= 0 ? '+' : ''}{formatNumber(totalNet, 4)} USDT
+                ZREALIZOWANY FIFO PnL NETTO: {totalNet >= 0 ? '+' : ''}{formatNumber(totalNet, 4)} USDT
               </Text>
-              <Text style={styles.summaryNote}>Widok: {rows.length} wykonań • baza rozliczenia FIFO: {historyRows.length} wykonań z do 365 dni. PnL nie jest już zerowany tylko dlatego, że BUY był przed wybranym zakresem.</Text>
+              <Text style={styles.summaryNote}>Widok: {rows.length} wykonań • baza FIFO: {historyRows.length} wykonań z do 365 dni. To NIE jest zmiana całego equity konta i nie obejmuje niezrealizowanej straty/zysku na otwartych coinach.</Text>
 
               <View style={styles.periodSection}>
                 <Text style={styles.periodTitle}>Zysk całkowity NETTO według okresu</Text>
@@ -536,6 +572,8 @@ const styles = StyleSheet.create({
   rangeButtonActive: { backgroundColor: '#F0B90B', borderColor: '#F0B90B' },
   rangeButtonText: { color: '#C8C8CC', fontSize: 11, fontWeight: '800' },
   rangeButtonTextActive: { color: '#111111' },
+  accountCard: { backgroundColor: '#151B22', borderWidth: 1, borderColor: '#36536B', borderRadius: 12, padding: 12, marginTop: 12 },
+  accountTitle: { color: '#7DD3FC', fontSize: 14, fontWeight: '900', marginBottom: 8 },
   summaryCard: { backgroundColor: '#171717', borderWidth: 1, borderColor: '#3A3A3A', borderRadius: 12, padding: 12, marginTop: 12 },
   summaryTitle: { color: '#FFFFFF', fontSize: 14, fontWeight: '900', marginBottom: 8 },
   summaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
