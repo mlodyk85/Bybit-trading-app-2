@@ -1,6 +1,6 @@
 # Bybit PRO Engine
 
-External 24/7 Spot execution engine for the mobile app.
+External autonomous 24/7 Spot execution engine for the mobile app.
 
 This is intentionally separate from React Native so trading does not stop when Android suspends the app. The phone is a controller/monitor; the engine runs continuously on a MacBook or VPS.
 
@@ -55,6 +55,7 @@ This is a stopping/goal condition, not a guaranteed daily return. If the engine 
    - `BYBIT_API_KEY`
    - `BYBIT_API_SECRET`
    - `PRO_ENGINE_TOKEN`
+   - keep `AUTO_START=true` for autonomous trading after process startup/restart
 4. Export the file and start:
    ```bash
    set -a
@@ -98,3 +99,12 @@ Never put the API secret into the Android app or commit `.env`.
 - Pair loss lock: 120 minutes after repeated losses
 
 Tune only after observing several days of fills and realized/unrealized PnL.
+
+
+## Autonomous mode
+
+`AUTO_START=true` is the default. On the first start the engine begins trading automatically as soon as it has valid Bybit credentials and market data.
+
+The mobile app does not need to remain open. The engine keeps scanning, opening trades, placing exits, reconciling orders and managing risk on the MacBook/VPS.
+
+An explicit **STOP** command is persisted in `state.json`; after a manual STOP, a process restart does not silently re-enable trading. Use **START** from the PRO tab to resume.
