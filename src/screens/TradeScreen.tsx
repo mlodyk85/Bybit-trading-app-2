@@ -1729,12 +1729,12 @@ export const TradeScreen: React.FC<Props> = ({
     let mounted = true;
     void loadTradingRunState().then((state) => {
       if (!mounted) return;
-      // A stored RUN request survives screen/app recreation. We resume automatically;
-      // only the explicit STOP buttons clear these flags.
-      if (state.smart && !accumulationRunning) startAccumulationEngine(true);
-      // Legacy live modes no longer auto-resume after app recreation/update.
-      // The 24/7 PRO Engine is the preferred execution path; legacy modes require an explicit START.
+      // All in-app trading engines are LEGACY/TEST. Never resume them automatically after
+      // app recreation/update: a stale flag must not start another BUY cycle in the background.
+      if (state.smart) void setTradingRunRequested('smart', false);
       if (state.happyHour) void setTradingRunRequested('happy-hour', false);
+      setAccumulationStatus('SMART LEGACY: zatrzymany po starcie aplikacji. Uruchom tylko ręcznie.');
+      setSmartStatus('LEGACY/TEST: zatrzymany po starcie aplikacji. Główny handel 24/7 = PRO ENGINE.');
     }).catch(() => undefined);
     return () => { mounted = false; };
     // Restore once for this screen instance; engines manage their own continuous loops.
