@@ -11,7 +11,7 @@ const API_SECRET = String(process.env.BYBIT_API_SECRET || '').trim();
 const TOKEN = String(process.env.PRO_ENGINE_TOKEN || '').trim();
 const PORT = Number(process.env.PORT || 8790);
 const TESTNET = String(process.env.BYBIT_TESTNET || 'false').toLowerCase() === 'true';
-const AUTO_START = String(process.env.AUTO_START || 'false').toLowerCase() === 'true';
+const AUTO_START = String(process.env.AUTO_START || 'true').toLowerCase() === 'true';
 const SYMBOLS = String(process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT,LINKUSDT,DOGEUSDT,SUIUSDT')
   .split(',').map(v => v.trim().toUpperCase()).filter(Boolean);
 
