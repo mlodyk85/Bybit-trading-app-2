@@ -88,11 +88,11 @@ export const ProEngineScreen: React.FC = () => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>PRO ENGINE</Text>
-      <Text style={styles.subtitle}>Bybit Spot • osobny silnik 24/7 • WebSocket + kontrola kapitału</Text>
+      <Text style={styles.subtitle}>Bybit Spot • autonomiczny silnik 24/7 • WebSocket + kontrola kapitału</Text>
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Połączenie</Text>
-        <Text style={styles.hint}>PRO Engine działa na MacBooku/VPS. Klucze Bybit zostają na tym komputerze; telefon przechowuje tylko adres i token sterujący.</Text>
+        <Text style={styles.hint}>PRO Engine działa autonomicznie na MacBooku/VPS i nie potrzebuje otwartej aplikacji w telefonie. Po uruchomieniu procesu sam skanuje rynek, kupuje, wystawia SELL i zarządza pozycjami. Klucze Bybit zostają na komputerze; telefon jest tylko panelem kontroli.</Text>
         <Text style={styles.label}>Adres PRO Engine</Text>
         <TextInput style={styles.input} value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} placeholder="http://192.168.1.10:8790" placeholderTextColor="#666" />
         <Text style={styles.label}>Token</Text>
@@ -144,7 +144,7 @@ export const ProEngineScreen: React.FC = () => {
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Sterowanie</Text>
-        <Text style={styles.warning}>Cel +10 USDT/dzień jest celem pracy silnika, nie gwarancją wyniku. Po osiągnięciu celu bot blokuje nowe wejścia do następnego dnia.</Text>
+        <Text style={styles.warning}>Tryb AUTONOMICZNY jest domyślny. START służy do wznowienia po ręcznym STOP. Cel +10 USDT/dzień jest celem pracy silnika, nie gwarancją wyniku; po osiągnięciu celu bot blokuje nowe wejścia do następnego dnia.</Text>
         <TouchableOpacity style={styles.start} onPress={() => { void command('START'); }}><Text style={styles.actionText}>START PRO ENGINE</Text></TouchableOpacity>
         <TouchableOpacity style={styles.stop} onPress={() => { void command('STOP'); }}><Text style={styles.actionText}>STOP NOWYCH WEJŚĆ</Text></TouchableOpacity>
         <TouchableOpacity style={styles.profit} onPress={() => { void command('CLOSE_PROFITABLE'); }}><Text style={styles.actionText}>UWOLNIJ DODATNIE POZYCJE</Text></TouchableOpacity>
