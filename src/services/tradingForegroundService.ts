@@ -9,7 +9,7 @@ type BackgroundServiceLike = {
   updateNotification?: (options: Record<string, unknown>) => Promise<void>;
 };
 
-const service = (BackgroundService ?? null) as BackgroundServiceLike | null;
+const service = (BackgroundService ?? null) as unknown as BackgroundServiceLike | null;
 const activeEngines = new Set<TradingEngine>();
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
