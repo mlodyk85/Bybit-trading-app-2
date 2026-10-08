@@ -41,8 +41,9 @@ const keepAliveTask = async (taskData?: { delay: number }) => {
 const options = {
   taskName: 'BybitTrading',
   taskTitle: 'Bybit Trading — handel aktywny',
-  taskDesc: 'Happy Hour / SMART pracuje w tle',
+  taskDesc: 'AI / SMART pracuje w tle',
   taskIcon: { name: 'ic_launcher', type: 'mipmap' },
+  foregroundServiceType: ['dataSync'],
   parameters: { delay: 15000 },
 };
 
