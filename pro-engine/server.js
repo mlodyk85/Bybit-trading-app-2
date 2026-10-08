@@ -13,8 +13,10 @@ const TOKEN = String(process.env.PRO_ENGINE_TOKEN || '').trim();
 const PORT = Number(process.env.PORT || 8790);
 const TESTNET = String(process.env.BYBIT_TESTNET || 'false').toLowerCase() === 'true';
 const AUTO_START = String(process.env.AUTO_START || 'true').toLowerCase() === 'true';
-const SYMBOLS = String(process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT,LINKUSDT,DOGEUSDT,SUIUSDT')
+const BOOTSTRAP_SYMBOLS = String(process.env.SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT,LINKUSDT,DOGEUSDT,SUIUSDT')
   .split(',').map(v => v.trim().toUpperCase()).filter(Boolean);
+const EXCLUDED_BASES = new Set(String(process.env.EXCLUDED_BASES || 'USDC,USDE,USDS,DAI,FDUSD,TUSD,PYUSD,EUR,EURC,BRZ')
+  .split(',').map(v => v.trim().toUpperCase()).filter(Boolean));
 
 const CFG = {
   dailyProfitTarget: Number(process.env.DAILY_PROFIT_TARGET_USDT || 10),
@@ -29,6 +31,11 @@ const CFG = {
   lossLockMs: Number(process.env.PAIR_LOSS_LOCK_MINUTES || 120) * 60_000,
   aiMinConfidence: Number(process.env.AI_MIN_CONFIDENCE || 0.62),
   aiLearningRate: Number(process.env.AI_LEARNING_RATE || 0.035),
+  universeSize: Math.max(6, Math.min(30, Number(process.env.UNIVERSE_SIZE || 14))),
+  universeRefreshMs: Number(process.env.UNIVERSE_REFRESH_MINUTES || 10) * 60_000,
+  minUniverseTurnover: Number(process.env.MIN_UNIVERSE_TURNOVER_USDT || 15_000_000),
+  minExpectedNetUsdt: Number(process.env.MIN_EXPECTED_NET_USDT || 0.08),
+  maxTargetPct: Number(process.env.MAX_SMART_TARGET_PCT || 1.25),
 };
 
 if (!API_KEY || !API_SECRET || !TOKEN) {
@@ -46,6 +53,10 @@ const market = new Map();
 const rules = new Map();
 const feeRates = new Map();
 const pairStats = new Map();
+let activeUniverse = [...BOOTSTRAP_SYMBOLS];
+let lastUniverseRefresh = 0;
+let wsClient = null;
+const wsSubscribed = new Set();
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
@@ -196,6 +207,77 @@ async function feeRate(symbol) {
   }
 }
 
+function baseCoinFromSymbol(symbol) {
+  return String(symbol || '').replace(/USDT$/, '');
+}
+
+function subscribeSymbols(symbols) {
+  if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
+  const args = [];
+  for (const symbol of symbols) {
+    if (!symbol || wsSubscribed.has(symbol)) continue;
+    wsSubscribed.add(symbol);
+    args.push(`tickers.${symbol}`, `orderbook.1.${symbol}`);
+  }
+  if (args.length) wsClient.send(JSON.stringify({ op: 'subscribe', args }));
+}
+
+async function refreshUniverse(force = false) {
+  if (!force && Date.now() - lastUniverseRefresh < CFG.universeRefreshMs) return activeUniverse;
+  const result = await bybitGet('/v5/market/tickers', { category: 'spot' });
+  const rows = Array.isArray(result?.list) ? result.list : [];
+  const scored = rows
+    .map(row => {
+      const symbol = String(row.symbol || '').toUpperCase();
+      const bid = Number(row.bid1Price || 0);
+      const ask = Number(row.ask1Price || 0);
+      const last = Number(row.lastPrice || 0);
+      const turnover = Number(row.turnover24h || 0);
+      const change = Number(row.price24hPcnt || 0) * 100;
+      const base = baseCoinFromSymbol(symbol);
+      const spreadPct = last > 0 ? (ask - bid) / last * 100 : 999;
+      const valid = symbol.endsWith('USDT')
+        && !EXCLUDED_BASES.has(base)
+        && bid > 0 && ask > bid && last > 0
+        && turnover >= CFG.minUniverseTurnover
+        && spreadPct >= 0 && spreadPct <= 0.16
+        && change > -18 && change < 28;
+      if (!valid) return null;
+      const score = Math.log10(Math.max(1, turnover)) * 8
+        - spreadPct * 180
+        - Math.max(0, Math.abs(change) - 8) * 0.45;
+      return { symbol, score, turnover, spreadPct, change };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+
+  const owned = state.positions.map(p => p.symbol);
+  const selected = [...new Set([
+    ...owned,
+    ...scored.slice(0, CFG.universeSize).map(row => row.symbol),
+    ...BOOTSTRAP_SYMBOLS.slice(0, 4),
+  ])].slice(0, Math.max(CFG.universeSize, owned.length + 4));
+
+  if (selected.length) {
+    activeUniverse = selected;
+    lastUniverseRefresh = Date.now();
+    subscribeSymbols(activeUniverse);
+    state.lastAction = `AI UNIVERSE: ${activeUniverse.length} liquid USDT pairs`;
+    saveState();
+  }
+  return activeUniverse;
+}
+
+function averageAbsoluteReturnPct(values, lookback = 20) {
+  if (!Array.isArray(values) || values.length < 2) return 0;
+  const moves = [];
+  const start = Math.max(1, values.length - lookback);
+  for (let i = start; i < values.length; i += 1) {
+    moves.push(Math.abs(pct(values[i - 1], values[i])));
+  }
+  return moves.length ? moves.reduce((sum, value) => sum + value, 0) / moves.length : 0;
+}
+
 function decimals(step) {
   const s = String(step);
   if (!s.includes('.')) return 0;
@@ -288,6 +370,7 @@ async function signalFor(symbol) {
   const ema50_15 = ema(c15.slice(-60), 50);
   const rsi14 = rsi(c1, 14);
   const atr = atrPct(one, 14);
+  const avgAbsMove1m = averageAbsoluteReturnPct(c1, 24);
   const mom3 = pct(c1[c1.length - 4], last);
   const mom5m = pct(c5[c5.length - 4], last5);
   const enoughRange = atr >= Math.max(0.035, spreadPct * 2.2);
@@ -324,6 +407,21 @@ async function signalFor(symbol) {
   };
 
   const aiConfidence = AI.predict(state.aiModel, features);
+  const fee = await feeRate(symbol);
+  const roundTripFeePct = (fee.taker + fee.maker) * 100;
+  const minimumGrossPct = roundTripFeePct + spreadPct + 0.10;
+  const volatilityTargetPct = Math.max(atr * 0.85, avgAbsMove1m * 1.7);
+  const smartTargetPct = clamp(
+    Math.max(minimumGrossPct, volatilityTargetPct) * (0.90 + aiConfidence * 0.25),
+    0.28,
+    CFG.maxTargetPct
+  );
+  const expectedNetPct = Math.max(0, smartTargetPct - roundTripFeePct - spreadPct);
+  const expectedHoldMinutes = clamp(
+    avgAbsMove1m > 0 ? smartTargetPct / avgAbsMove1m : 20,
+    2,
+    120
+  );
   const learned = Number(state.aiModel.tradesLearned || 0);
   const adaptiveThreshold = learned < 20
     ? Math.max(0.58, CFG.aiMinConfidence - 0.04)
@@ -364,6 +462,10 @@ async function signalFor(symbol) {
     aiConfidence,
     aiThreshold: adaptiveThreshold,
     aiFeatures: features,
+    smartTargetPct,
+    expectedNetPct,
+    expectedHoldMinutes,
+    avgAbsMove1m,
   };
 }
 
@@ -441,6 +543,12 @@ async function openPosition(sig, account) {
   const confidenceFactor = clamp(0.75 + (Number(sig.aiConfidence || 0.5) - 0.5) * 1.7, 0.75, 1.35);
   const rewardFactor = clamp(1 + Number(state.aiModel.rollingReward || 0) * 0.20, 0.80, 1.15);
   const stake = clamp(rawStake * confidenceFactor * rewardFactor, CFG.minStake, CFG.maxStake);
+  const expectedNetUsdt = stake * Math.max(0, Number(sig.expectedNetPct || 0)) / 100;
+  if (expectedNetUsdt < CFG.minExpectedNetUsdt) {
+    state.lastAction = `AI SKIP ${sig.symbol} • expected net ${expectedNetUsdt.toFixed(3)} USDT < ${CFG.minExpectedNetUsdt.toFixed(2)}`;
+    saveState();
+    return false;
+  }
   if (account.freeUsdt - reserve < stake) {
     state.lastAction = `BUY BLOCKED: reserve ${CFG.minFreePct}%`;
     return false;
@@ -466,9 +574,9 @@ async function openPosition(sig, account) {
   const qty = Math.max(0, fill.qty - baseFee);
   const cost = fill.quote + usdtFee + baseFee * fill.avg;
 
-  // Dynamic TP: fees + spread + volatility. The engine tries to rotate capital rather than wait for huge moves.
-  const roundTripPct = (fee.taker + fee.maker) * 100;
-  const targetPct = clamp(Math.max(0.30, roundTripPct + sig.spreadPct + 0.10, sig.atrPct * 0.75), 0.30, 1.05);
+  // SMART EXIT: target is calculated before entry from current fees, spread, ATR,
+  // recent 1m realized movement and AI confidence, then placed immediately after the BUY fill.
+  const targetPct = clamp(Number(sig.smartTargetPct || 0.35), 0.28, CFG.maxTargetPct);
   const stopPct = clamp(Math.max(0.75, sig.atrPct * 2.3), 0.75, 1.80);
 
   const position = {
@@ -479,9 +587,12 @@ async function openPosition(sig, account) {
     aiConfidence: Number(sig.aiConfidence || 0),
     aiThreshold: Number(sig.aiThreshold || 0),
     aiFeatures: sig.aiFeatures || null,
+    expectedNetPct: Number(sig.expectedNetPct || 0),
+    expectedNetUsdt,
+    expectedHoldMinutes: Number(sig.expectedHoldMinutes || 0),
   };
   state.positions.push(position);
-  state.lastAction = `AI BUY ${sig.symbol} ${stake.toFixed(2)} USDT • ${sig.setup} • confidence ${(Number(sig.aiConfidence || 0) * 100).toFixed(1)}%`;
+  state.lastAction = `AI BUY ${sig.symbol} ${stake.toFixed(2)} USDT • target +${targetPct.toFixed(2)}% • est net +${expectedNetUsdt.toFixed(3)} USDT • ${sig.setup}`;
   saveState();
   await placeExit(position, targetPct);
   return true;
@@ -635,12 +746,14 @@ async function engineTick() {
     const account = await wallet();
     await riskGate(account);
     await reconcilePositions();
+    await refreshUniverse(false);
 
     if (!state.running || state.dayLocked) return;
     if (state.positions.length >= CFG.maxOpen) return;
     if (account.equity <= 0 || account.freeUsdt <= 0) return;
 
-    const symbol = SYMBOLS[symbolIndex++ % SYMBOLS.length];
+    const symbols = activeUniverse.length ? activeUniverse : BOOTSTRAP_SYMBOLS;
+    const symbol = symbols[symbolIndex++ % symbols.length];
     if (state.positions.some(p => p.symbol === symbol)) return;
     if (Number(state.cooldowns[symbol] || 0) > Date.now()) return;
     if ((pairStats.get(symbol)?.lockUntil || 0) > Date.now()) return;
@@ -658,13 +771,11 @@ async function engineTick() {
 
 function wsConnect() {
   const ws = new WebSocket(WS_PUBLIC);
+  wsClient = ws;
+  wsSubscribed.clear();
   ws.on('open', () => {
-    const args = [];
-    for (const s of SYMBOLS) {
-      args.push(`tickers.${s}`);
-      args.push(`orderbook.1.${s}`);
-    }
-    ws.send(JSON.stringify({ op: 'subscribe', args }));
+    subscribeSymbols(activeUniverse.length ? activeUniverse : BOOTSTRAP_SYMBOLS);
+    void refreshUniverse(true).catch(() => undefined);
   });
   ws.on('message', raw => {
     try {
@@ -742,11 +853,16 @@ function statusSnapshot() {
         pnl: p.qty * mark - p.costUsdt, openedAt: p.openedAt,
         targetPct: p.targetPct, stopPct: p.stopPct, setup: p.setup,
         aiConfidence: Number(p.aiConfidence || 0),
+        expectedNetUsdt: Number(p.expectedNetUsdt || 0),
+        expectedHoldMinutes: Number(p.expectedHoldMinutes || 0),
       };
     }),
     maxOpen: CFG.maxOpen,
     reservePct: CFG.minFreePct,
     stakePct: CFG.stakePct,
+    universe: activeUniverse,
+    universeSize: activeUniverse.length,
+    minExpectedNetUsdt: CFG.minExpectedNetUsdt,
     ai: {
       mode: 'ONLINE_LOGISTIC',
       minConfidence: CFG.aiMinConfidence,
