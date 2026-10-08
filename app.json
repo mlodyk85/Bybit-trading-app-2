@@ -31,6 +31,9 @@
         "backgroundColor": "#121212"
       },
       "package": "com.bybittradingapp.app"
-    }
+    },
+    "plugins": [
+      "./plugins/withBackgroundActions"
+    ]
   }
 }
