@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 const { URL } = require('url');
+const AI = require('./aiModel');
 
 const API_KEY = String(process.env.BYBIT_API_KEY || '').trim();
 const API_SECRET = String(process.env.BYBIT_API_SECRET || '').trim();
@@ -26,6 +27,8 @@ const CFG = {
   maxStake: Number(process.env.MAX_STAKE_USDT || 35),
   cooldownMs: Number(process.env.COOLDOWN_MINUTES || 10) * 60_000,
   lossLockMs: Number(process.env.PAIR_LOSS_LOCK_MINUTES || 120) * 60_000,
+  aiMinConfidence: Number(process.env.AI_MIN_CONFIDENCE || 0.62),
+  aiLearningRate: Number(process.env.AI_LEARNING_RATE || 0.035),
 };
 
 if (!API_KEY || !API_SECRET || !TOKEN) {
@@ -63,6 +66,8 @@ function defaultState() {
     positions: [],
     closed: [],
     cooldowns: {},
+    aiModel: AI.defaultModel(),
+    lastAiDecision: null,
   };
 }
 
@@ -74,6 +79,7 @@ try {
 } catch (e) {
   console.error('state load failed', e.message);
 }
+state.aiModel = AI.ensureModel(state.aiModel);
 
 function saveState() {
   const tmp = STATE_PATH + '.tmp';
@@ -261,48 +267,103 @@ async function signalFor(symbol) {
   if (spreadPct < 0 || spreadPct > 0.14) return null;
   if ((m.turnover24h || 0) < 5_000_000) return null;
 
-  const [one, five] = await Promise.all([klines(symbol, '1', 80), klines(symbol, '5', 60)]);
-  if (one.length < 30 || five.length < 30) return null;
+  const [one, five, fifteen] = await Promise.all([
+    klines(symbol, '1', 90),
+    klines(symbol, '5', 70),
+    klines(symbol, '15', 60),
+  ]);
+  if (one.length < 40 || five.length < 35 || fifteen.length < 30) return null;
 
   const c1 = one.map(x => x.close);
   const c5 = five.map(x => x.close);
+  const c15 = fifteen.map(x => x.close);
   const last = c1[c1.length - 1];
-  const ema9 = ema(c1.slice(-50), 9);
-  const ema21 = ema(c1.slice(-60), 21);
-  const ema9_5 = ema(c5.slice(-50), 9);
-  const ema21_5 = ema(c5.slice(-60), 21);
+  const last5 = c5[c5.length - 1];
+  const last15 = c15[c15.length - 1];
+  const ema9 = ema(c1.slice(-60), 9);
+  const ema21 = ema(c1.slice(-70), 21);
+  const ema9_5 = ema(c5.slice(-60), 9);
+  const ema21_5 = ema(c5.slice(-70), 21);
+  const ema20_15 = ema(c15.slice(-60), 20);
+  const ema50_15 = ema(c15.slice(-60), 50);
   const rsi14 = rsi(c1, 14);
   const atr = atrPct(one, 14);
   const mom3 = pct(c1[c1.length - 4], last);
-  const mom5m = pct(c5[c5.length - 4], c5[c5.length - 1]);
+  const mom5m = pct(c5[c5.length - 4], last5);
   const enoughRange = atr >= Math.max(0.035, spreadPct * 2.2);
   if (!enoughRange || mom5m < -0.85) return null;
 
-  // Setup A: mean reversion. Price is discounted vs EMA21, but a short rebound has already started.
   const discountPct = ema21 > 0 ? (ema21 - last) / ema21 * 100 : 0;
   const meanReversion = discountPct >= 0.05 && discountPct <= 1.10
     && rsi14 >= 34 && rsi14 <= 54
     && mom3 >= 0.025
-    && c5[c5.length - 1] >= ema21_5 * 0.992;
+    && last5 >= ema21_5 * 0.992
+    && last15 >= ema50_15 * 0.985;
 
-  // Setup B: trend pullback. Uptrend remains intact, price has pulled close to EMA9, then resumes.
   const distanceToFast = ema9 > 0 ? Math.abs(last - ema9) / ema9 * 100 : 99;
   const trendPullback = ema9 > ema21
     && ema9_5 >= ema21_5
+    && ema20_15 >= ema50_15
     && distanceToFast <= 0.22
     && rsi14 >= 48 && rsi14 <= 67
     && mom3 >= 0.02;
 
   if (!meanReversion && !trendPullback) return null;
-  const score = (meanReversion ? 2.2 : 1.8)
-    + clamp(mom3, 0, 0.30) * 7
+
+  const features = {
+    trend1m: clamp(((ema9 - ema21) / Math.max(last, 1e-9) * 100) / 0.30, -1, 1),
+    trend5m: clamp(((ema9_5 - ema21_5) / Math.max(last5, 1e-9) * 100) / 0.45, -1, 1),
+    trend15m: clamp(((ema20_15 - ema50_15) / Math.max(last15, 1e-9) * 100) / 0.75, -1, 1),
+    rsiBalance: clamp(1 - Math.abs(rsi14 - 55) / 25, -1, 1),
+    momentum1m: clamp(mom3 / 0.30, -1, 1),
+    momentum5m: clamp(mom5m / 0.65, -1, 1),
+    atrVsSpread: clamp((atr / Math.max(0.01, spreadPct) - 2) / 5, -1, 1),
+    discount: clamp(discountPct / 1.0, -1, 1),
+    liquidity: clamp((Math.log10(Math.max(1, m.turnover24h)) - 6.7) / 2.0, -1, 1),
+    setupBias: meanReversion ? 0.45 : 0.80,
+  };
+
+  const aiConfidence = AI.predict(state.aiModel, features);
+  const learned = Number(state.aiModel.tradesLearned || 0);
+  const adaptiveThreshold = learned < 20
+    ? Math.max(0.58, CFG.aiMinConfidence - 0.04)
+    : clamp(CFG.aiMinConfidence - Number(state.aiModel.rollingReward || 0) * 0.03, 0.58, 0.70);
+
+  state.lastAiDecision = {
+    symbol,
+    confidence: aiConfidence,
+    threshold: adaptiveThreshold,
+    setup: meanReversion ? 'DIP_REBOUND' : 'TREND_PULLBACK',
+    at: Date.now(),
+    accepted: aiConfidence >= adaptiveThreshold,
+  };
+
+  if (aiConfidence < adaptiveThreshold) {
+    state.lastAction = `AI REJECT ${symbol} • confidence ${(aiConfidence * 100).toFixed(1)}% < ${(adaptiveThreshold * 100).toFixed(1)}%`;
+    saveState();
+    return null;
+  }
+
+  const score = aiConfidence * 100
+    + clamp(mom3, 0, 0.30) * 8
     + clamp(atr, 0, 0.40) * 2
-    - spreadPct * 10
-    + (m.turnover24h > 50_000_000 ? 0.4 : 0);
+    - spreadPct * 8;
 
   return {
-    symbol, score, setup: meanReversion ? 'DIP_REBOUND' : 'TREND_PULLBACK',
-    spreadPct, rsi14, atrPct: atr, mom3Pct: mom3, mom5mPct: mom5m, bid: m.bid, ask: m.ask, last,
+    symbol,
+    score,
+    setup: meanReversion ? 'DIP_REBOUND' : 'TREND_PULLBACK',
+    spreadPct,
+    rsi14,
+    atrPct: atr,
+    mom3Pct: mom3,
+    mom5mPct: mom5m,
+    bid: m.bid,
+    ask: m.ask,
+    last,
+    aiConfidence,
+    aiThreshold: adaptiveThreshold,
+    aiFeatures: features,
   };
 }
 
@@ -377,7 +438,9 @@ async function openPosition(sig, account) {
   const equity = account.equity;
   const reserve = equity * CFG.minFreePct / 100;
   const rawStake = equity * CFG.stakePct / 100;
-  const stake = clamp(rawStake, CFG.minStake, CFG.maxStake);
+  const confidenceFactor = clamp(0.75 + (Number(sig.aiConfidence || 0.5) - 0.5) * 1.7, 0.75, 1.35);
+  const rewardFactor = clamp(1 + Number(state.aiModel.rollingReward || 0) * 0.20, 0.80, 1.15);
+  const stake = clamp(rawStake * confidenceFactor * rewardFactor, CFG.minStake, CFG.maxStake);
   if (account.freeUsdt - reserve < stake) {
     state.lastAction = `BUY BLOCKED: reserve ${CFG.minFreePct}%`;
     return false;
@@ -413,9 +476,12 @@ async function openPosition(sig, account) {
     openedAt: Date.now(), updatedAt: Date.now(), setup: sig.setup,
     targetPct, stopPct, peakPct: 0, exitOrderId: null, targetPrice: 0,
     entryTakerFee: fee.taker, exitMakerFee: fee.maker,
+    aiConfidence: Number(sig.aiConfidence || 0),
+    aiThreshold: Number(sig.aiThreshold || 0),
+    aiFeatures: sig.aiFeatures || null,
   };
   state.positions.push(position);
-  state.lastAction = `BUY ${sig.symbol} ${stake.toFixed(2)} USDT • ${sig.setup}`;
+  state.lastAction = `AI BUY ${sig.symbol} ${stake.toFixed(2)} USDT • ${sig.setup} • confidence ${(Number(sig.aiConfidence || 0) * 100).toFixed(1)}%`;
   saveState();
   await placeExit(position, targetPct);
   return true;
@@ -444,10 +510,19 @@ async function marketClose(position, reason) {
 
 function recordClosed(position, pnl, reason) {
   state.positions = state.positions.filter(p => p.id !== position.id);
+  if (position.aiFeatures) {
+    state.aiModel = AI.update(
+      state.aiModel,
+      position.aiFeatures,
+      pnl,
+      Number(position.costUsdt || 0),
+      CFG.aiLearningRate
+    );
+  }
   state.realizedToday += pnl;
   state.tradesToday += 1;
   if (pnl >= 0) state.winsToday += 1; else state.lossesToday += 1;
-  state.closed.unshift({ symbol: position.symbol, pnl, reason, openedAt: position.openedAt, closedAt: Date.now(), setup: position.setup });
+  state.closed.unshift({ symbol: position.symbol, pnl, reason, openedAt: position.openedAt, closedAt: Date.now(), setup: position.setup, aiConfidence: position.aiConfidence || 0 });
   state.closed = state.closed.slice(0, 200);
   state.cooldowns[position.symbol] = Date.now() + CFG.cooldownMs;
 
@@ -666,11 +741,23 @@ function statusSnapshot() {
         symbol: p.symbol, qty: p.qty, entryPrice: p.entryPrice, markPrice: mark,
         pnl: p.qty * mark - p.costUsdt, openedAt: p.openedAt,
         targetPct: p.targetPct, stopPct: p.stopPct, setup: p.setup,
+        aiConfidence: Number(p.aiConfidence || 0),
       };
     }),
     maxOpen: CFG.maxOpen,
     reservePct: CFG.minFreePct,
     stakePct: CFG.stakePct,
+    ai: {
+      mode: 'ONLINE_LOGISTIC',
+      minConfidence: CFG.aiMinConfidence,
+      tradesLearned: Number(state.aiModel.tradesLearned || 0),
+      winsLearned: Number(state.aiModel.winsLearned || 0),
+      lossesLearned: Number(state.aiModel.lossesLearned || 0),
+      rollingReward: Number(state.aiModel.rollingReward || 0),
+      lastUpdateAt: Number(state.aiModel.lastUpdateAt || 0),
+      lastDecision: state.lastAiDecision,
+      topWeights: AI.topWeights(state.aiModel, 4),
+    },
     lastAction: state.lastAction,
     recentClosed: state.closed.slice(0, 10),
   };
@@ -734,5 +821,5 @@ const app = http.createServer(async (req, res) => {
 wsConnect();
 setInterval(() => { void engineTick(); }, 1500);
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`PRO ENGINE listening on :${PORT} • Bybit ${TESTNET ? 'TESTNET' : 'MAINNET'} • daily target ${CFG.dailyProfitTarget} USDT`);
+  console.log(`AI PRO ENGINE listening on :${PORT} • Bybit ${TESTNET ? 'TESTNET' : 'MAINNET'} • online model • daily target ${CFG.dailyProfitTarget} USDT`);
 });
