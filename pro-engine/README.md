@@ -145,3 +145,30 @@ An explicit **STOP** command is persisted in `state.json`; after a manual STOP, 
 - `AI_LEARNING_RATE=0.035` — online update step.
 
 Do not raise position size just because model confidence is high. The engine already applies only a bounded confidence multiplier to the stake.
+
+
+## Autonomous market selection
+
+The engine no longer relies only on a fixed symbol list. Every few minutes it refreshes a liquid USDT universe from Bybit Spot tickers and filters for:
+
+- minimum 24h turnover,
+- narrow spread,
+- non-stablecoin base assets,
+- avoidance of extreme 24h pumps/dumps,
+- existing engine-owned positions so exits are never abandoned.
+
+The current universe is pushed to the Android AI panel.
+
+## Smart exit plan immediately after BUY
+
+Before opening a position the engine estimates:
+
+- round-trip fee cost,
+- live spread,
+- ATR,
+- average absolute 1m movement,
+- AI confidence.
+
+It derives a dynamic profit target and expected holding time from those inputs. If the projected **net** profit is below `MIN_EXPECTED_NET_USDT`, the trade is skipped.
+
+After the BUY fill is confirmed, the engine immediately places a PostOnly LIMIT SELL above the actual average entry. This is the primary exit. Trailing-profit and recovery exits remain secondary fallbacks.
