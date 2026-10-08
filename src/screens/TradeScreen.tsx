@@ -933,7 +933,8 @@ export const TradeScreen: React.FC<Props> = ({
         position = { ...position, exitOrderId: undefined, targetSellPrice: undefined };
         livePositionsRef.current = livePositionsRef.current.map((item) => item.id === position.id ? position : item);
       }
-      const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty, 'happy-hour');
+      const sellOwner = isCoreAccumulationSymbol(position.symbol) ? 'smart' : 'happy-hour';
+      const ack = await placeSpotMarketSellBase(credentials, position.symbol, position.qty, sellOwner);
       const fill = await waitForSpotFill(credentials, ack.orderId);
       const baseCoin = position.symbol.replace(/USDT$/, '');
       const sellFeeUsdt = fill.feeByCurrency.USDT || 0;
@@ -969,6 +970,77 @@ export const TradeScreen: React.FC<Props> = ({
   const creditCoreFund = (realizedPnlUsdt: number) => {
     if (!Number.isFinite(realizedPnlUsdt) || realizedPnlUsdt <= 0) return;
     coreAccumulationFundRef.current += realizedPnlUsdt * CORE_PROFIT_ALLOCATION_PCT;
+  };
+
+
+  const protectAutonomousBuyWithProfitSell = async (
+    symbol: string,
+    qty: number,
+    costUsdt: number,
+    entryPrice: number,
+    idPrefix: string,
+  ): Promise<{ position: TrackedPosition; protected: boolean; message: string }> => {
+    // HARD INVARIANT: every autonomous BUY must immediately receive an exchange-side
+    // profitable GTC SELL. We sell only the exact lot the bot has just bought.
+    const minNetProfit = Math.max(0.05, costUsdt * 0.0035);
+    const feeAdjustedTarget = qty > 0
+      ? (costUsdt + minNetProfit) / (qty * (1 - SPOT_MAKER_FEE_PCT / 100))
+      : entryPrice * 1.005;
+    const desiredSellPrice = Math.max(entryPrice * 1.0045, feeAdjustedTarget);
+
+    let lastMessage = 'nieznany błąd';
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      try {
+        const exit = await placeSpotLimitSellBase(credentials, symbol, qty, desiredSellPrice, 'smart');
+        const protectedCost = qty > 0 ? costUsdt * (exit.normalizedQty / qty) : costUsdt;
+        return {
+          protected: true,
+          message: `SELL GTC @ ${priceText(exit.normalizedPrice)} • min. NET +${minNetProfit.toFixed(3)} USDT`,
+          position: {
+            id: `${idPrefix}-${symbol}-${Date.now()}`,
+            symbol,
+            qty: exit.normalizedQty,
+            costUsdt: protectedCost,
+            entryPrice,
+            peakMovePct: 0,
+            currentMovePct: 0,
+            currentPnlUsdt: 0,
+            sellReady: false,
+            fromPortfolio: false,
+            exitOrderId: exit.orderId,
+            targetSellPrice: exit.normalizedPrice,
+            createdAt: Date.now(),
+          },
+        };
+      } catch (e: unknown) {
+        lastMessage = e instanceof Error ? e.message : 'błąd GTC SELL';
+        await sleep(500 * attempt);
+      }
+    }
+
+    // Do not keep opening new autonomous BUYs after an unprotected fill.
+    accumulationStopRef.current = true;
+    stopRef.current = true;
+    void setTradingRunRequested('smart', false);
+    void setTradingRunRequested('happy-hour', false);
+
+    return {
+      protected: false,
+      message: `CRITICAL: BUY wykonany, ale SELL nie został wystawiony po 5 próbach: ${lastMessage}. Nowe BUY zostały zatrzymane.`,
+      position: {
+        id: `${idPrefix}-unprotected-${symbol}-${Date.now()}`,
+        symbol,
+        qty,
+        costUsdt,
+        entryPrice,
+        peakMovePct: 0,
+        currentMovePct: 0,
+        currentPnlUsdt: 0,
+        sellReady: false,
+        fromPortfolio: false,
+        createdAt: Date.now(),
+      },
+    };
   };
 
   const tryBuyStrategicDip = async (): Promise<boolean> => {
@@ -1010,21 +1082,21 @@ export const TradeScreen: React.FC<Props> = ({
     const actualCost = fill.quoteValue + feeUsdt;
     coreAccumulationFundRef.current = Math.max(0, coreAccumulationFundRef.current - actualCost);
 
-    const existing = livePositionsRef.current.find((item) => item.fromPortfolio && item.symbol === candidate.symbol);
-    if (existing) {
-      const nextQty = existing.qty + netQty;
-      const nextCost = existing.costUsdt + actualCost;
-      livePositionsRef.current = livePositionsRef.current.map((item) => item.id === existing.id ? {
-        ...item,
-        qty: nextQty,
-        costUsdt: nextCost,
-        entryPrice: nextQty > 0 ? nextCost / nextQty : item.entryPrice,
-      } : item);
-      setLivePositions([...livePositionsRef.current]);
-    }
-    setAccumulationStatus(`CORE BUY ${candidate.symbol}: +${netQty.toPrecision(7)} za ${actualCost.toFixed(2)} USDT z wypracowanego zysku. Rezerwa USDT pozostaje nienaruszona.`);
+    const protection = await protectAutonomousBuyWithProfitSell(
+      candidate.symbol,
+      netQty,
+      actualCost,
+      fill.avgPrice,
+      'core-profit-lot',
+    );
+    livePositionsRef.current = [...livePositionsRef.current, protection.position];
+    setLivePositions([...livePositionsRef.current]);
+    setAccumulationStatus(
+      `CORE BUY ${candidate.symbol}: +${netQty.toPrecision(7)} za ${actualCost.toFixed(2)} USDT • ${protection.message}`
+    );
+    if (!protection.protected) setError(protection.message);
     await refreshAvailableUsdt();
-    return true;
+    return protection.protected;
   };
 
   const trySeedSmartPosition = async (): Promise<boolean> => {
@@ -1089,28 +1161,21 @@ export const TradeScreen: React.FC<Props> = ({
       const qty = Math.max(0, fill.baseQty - (fill.feeByCurrency[baseCoin] || 0));
       const feeUsdt = (fill.feeByCurrency.USDT || 0) + (fill.feeByCurrency[baseCoin] || 0) * fill.avgPrice;
       const cost = fill.quoteValue + feeUsdt;
-      livePositionsRef.current = [...livePositionsRef.current, {
-        id: `smart-seed-${selected.item.symbol}-${Date.now()}`,
-        symbol: selected.item.symbol,
+      const protection = await protectAutonomousBuyWithProfitSell(
+        selected.item.symbol,
         qty,
-        costUsdt: cost,
-        entryPrice: fill.avgPrice,
-        peakMovePct: 0,
-        currentMovePct: 0,
-        currentPnlUsdt: 0,
-        sellReady: false,
-        fromPortfolio: true,
-      }];
+        cost,
+        fill.avgPrice,
+        'smart-seed-lot',
+      );
+      livePositionsRef.current = [...livePositionsRef.current, protection.position];
       setLivePositions([...livePositionsRef.current]);
-      setManagedHoldings((current) => current.some((item) => item.symbol === selected.item.symbol) ? current : [...current, {
-        symbol: selected.item.symbol,
-        baseQty: qty,
-        buyPrice: fill.avgPrice,
-        buyCostUsdt: cost,
-      }]);
-      setAccumulationStatus(`SMART BUY ${selected.item.symbol}: ${cost.toFixed(2)} USDT • pozycja dodana do COIN BUILDER. Teraz pracuje część robocza i mechanizm SELL → BUY BACK.`);
+      setAccumulationStatus(
+        `SMART BUY ${selected.item.symbol}: ${cost.toFixed(2)} USDT • ${protection.message}`
+      );
+      if (!protection.protected) setError(protection.message);
       await refreshAvailableUsdt();
-      return true;
+      return protection.protected;
     } catch (e: unknown) {
       setAccumulationStatus(`SMART BUY nieudany: ${e instanceof Error ? e.message : 'błąd zlecenia'}.`);
       return false;
