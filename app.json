@@ -2,7 +2,7 @@
   "expo": {
     "name": "Bybit Trading App",
     "slug": "bybit-trading-app",
-    "version": "1.9.25",
+    "version": "1.9.26",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -15,10 +15,10 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "215"
+      "buildNumber": "216"
     },
     "android": {
-      "versionCode": 215,
+      "versionCode": 216,
       "permissions": [
         "REQUEST_INSTALL_PACKAGES",
         "FOREGROUND_SERVICE",
