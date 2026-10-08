@@ -22,6 +22,7 @@ export interface ProEnginePosition {
   targetPct: number;
   stopPct: number;
   setup: string;
+  aiConfidence?: number;
 }
 
 export interface ProEngineStatus {
@@ -41,6 +42,24 @@ export interface ProEngineStatus {
   reservePct: number;
   stakePct: number;
   lastAction: string;
+  ai?: {
+    mode: string;
+    minConfidence: number;
+    tradesLearned: number;
+    winsLearned: number;
+    lossesLearned: number;
+    rollingReward: number;
+    lastUpdateAt: number;
+    lastDecision?: {
+      symbol: string;
+      confidence: number;
+      threshold: number;
+      setup: string;
+      at: number;
+      accepted: boolean;
+    } | null;
+    topWeights?: Array<{ name: string; weight: number }>;
+  };
   account?: {
     equity: number;
     balance: number;
