@@ -1,6 +1,6 @@
-# Bybit PRO Engine
+# Bybit AI PRO Engine
 
-External autonomous 24/7 Spot execution engine for the mobile app.
+External autonomous 24/7 Spot execution engine with an adaptive online-learning layer for the mobile app.
 
 This is intentionally separate from React Native so trading does not stop when Android suspends the app. The phone is a controller/monitor; the engine runs continuously on a MacBook or VPS.
 
@@ -12,6 +12,22 @@ The design borrows mature patterns rather than copying code:
 - WebSocket-driven market data and exchange reconciliation similar to Hummingbot connectors.
 - Pair cooldowns, loss locks and max-drawdown/day locks similar to Freqtrade protections.
 - The engine only manages lots it opened itself. It does not sell your pre-existing BTC/XRP/other holdings.
+
+## AI decision layer
+
+The engine uses a lightweight online logistic model rather than an LLM. The model scores every technically valid setup using normalized market features:
+
+- 1m, 5m and 15m trend alignment,
+- RSI balance,
+- short momentum and 5m momentum,
+- ATR relative to spread,
+- discount from EMA,
+- 24h liquidity,
+- setup type.
+
+The initial model uses conservative bootstrap weights. After every fully closed engine-owned trade it updates the weights using the actual net PnL as reward/penalty. The model state is persisted in `state.json`, so learning survives restarts.
+
+The AI is not allowed to bypass hard risk controls. Daily loss, drawdown, USDT reserve, position count, pair cooldowns and pair loss locks remain deterministic.
 
 ## Strategy
 
@@ -41,6 +57,19 @@ After BUY:
 Default: `DAILY_PROFIT_TARGET_USDT=10`.
 
 This is a stopping/goal condition, not a guaranteed daily return. If the engine reaches +10 USDT realized PnL, it stops opening new positions for the rest of the UTC day.
+
+## Autonomous MacBook service
+
+After the normal setup below, install the macOS LaunchAgent:
+
+```bash
+cd Bybit-trading-app-2/pro-engine
+/bin/zsh install-macos-launchagent.sh
+```
+
+This configures **RunAtLoad + KeepAlive**. The process starts after macOS login and is restarted if it exits. Logs are written to `pro-engine/logs/`.
+
+The MacBook still needs power, internet access and must not be in deep sleep for true 24/7 operation. For uninterrupted operation, a VPS remains the better host.
 
 ## MacBook setup
 
@@ -108,3 +137,11 @@ Tune only after observing several days of fills and realized/unrealized PnL.
 The mobile app does not need to remain open. The engine keeps scanning, opening trades, placing exits, reconciling orders and managing risk on the MacBook/VPS.
 
 An explicit **STOP** command is persisted in `state.json`; after a manual STOP, a process restart does not silently re-enable trading. Use **START** from the PRO tab to resume.
+
+
+## AI tuning
+
+- `AI_MIN_CONFIDENCE=0.62` — minimum model probability after the bootstrap period.
+- `AI_LEARNING_RATE=0.035` — online update step.
+
+Do not raise position size just because model confidence is high. The engine already applies only a bounded confidence multiplier to the stake.
