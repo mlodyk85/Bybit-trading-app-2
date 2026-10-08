@@ -23,6 +23,8 @@ export interface ProEnginePosition {
   stopPct: number;
   setup: string;
   aiConfidence?: number;
+  expectedNetUsdt?: number;
+  expectedHoldMinutes?: number;
 }
 
 export interface ProEngineStatus {
@@ -42,6 +44,9 @@ export interface ProEngineStatus {
   reservePct: number;
   stakePct: number;
   lastAction: string;
+  universe?: string[];
+  universeSize?: number;
+  minExpectedNetUsdt?: number;
   ai?: {
     mode: string;
     minConfidence: number;
