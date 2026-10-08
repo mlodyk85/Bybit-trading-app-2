@@ -87,12 +87,12 @@ export const ProEngineScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>PRO ENGINE</Text>
-      <Text style={styles.subtitle}>Bybit Spot • autonomiczny silnik 24/7 • WebSocket + kontrola kapitału</Text>
+      <Text style={styles.title}>AI ENGINE</Text>
+      <Text style={styles.subtitle}>Bybit Spot • autonomiczny AI trader 24/7 • uczenie online + WebSocket</Text>
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Połączenie</Text>
-        <Text style={styles.hint}>PRO Engine działa autonomicznie na MacBooku/VPS i nie potrzebuje otwartej aplikacji w telefonie. Po uruchomieniu procesu sam skanuje rynek, kupuje, wystawia SELL i zarządza pozycjami. Klucze Bybit zostają na komputerze; telefon jest tylko panelem kontroli.</Text>
+        <Text style={styles.hint}>AI Engine działa autonomicznie na MacBooku/VPS i nie potrzebuje otwartej aplikacji w telefonie. Model ocenia wejścia na podstawie trendu 1m/5m/15m, RSI, momentum, ATR/spread, dyskonta i płynności, a po zamkniętych transakcjach aktualizuje swoje wagi. Ryzyko pozostaje ograniczone twardymi limitami.</Text>
         <Text style={styles.label}>Adres PRO Engine</Text>
         <TextInput style={styles.input} value={url} onChangeText={setUrl} autoCapitalize="none" autoCorrect={false} placeholder="http://192.168.1.10:8790" placeholderTextColor="#666" />
         <Text style={styles.label}>Token</Text>
@@ -129,13 +129,33 @@ export const ProEngineScreen: React.FC = () => {
         ) : <Text style={styles.hint}>Uruchom PRO Engine na MacBooku/VPS i wpisz jego adres oraz token.</Text>}
       </View>
 
+      {status?.ai && (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>AI — uczenie adaptacyjne</Text>
+          <View style={styles.metrics}>
+            <Text style={styles.metric}>Model {status.ai.mode}</Text>
+            <Text style={styles.metric}>Nauczone {status.ai.tradesLearned}</Text>
+            <Text style={styles.metric}>W/L modelu {status.ai.winsLearned}/{status.ai.lossesLearned}</Text>
+            <Text style={styles.metric}>Próg {(status.ai.minConfidence * 100).toFixed(0)}%</Text>
+          </View>
+          {status.ai.lastDecision ? (
+            <>
+              <Text style={styles.hint}>Ostatnia decyzja: {status.ai.lastDecision.symbol} • {status.ai.lastDecision.setup} • confidence {(status.ai.lastDecision.confidence * 100).toFixed(1)}% / próg {(status.ai.lastDecision.threshold * 100).toFixed(1)}% • {status.ai.lastDecision.accepted ? 'ACCEPT' : 'REJECT'}</Text>
+            </>
+          ) : <Text style={styles.hint}>Model czeka na pierwszy kompletny sygnał.</Text>}
+          {!!status.ai.topWeights?.length && (
+            <Text style={styles.hint}>Najsilniejsze cechy: {status.ai.topWeights.map((item) => `${item.name} ${item.weight >= 0 ? '+' : ''}${item.weight.toFixed(2)}`).join(' • ')}</Text>
+          )}
+        </View>
+      )}
+
       {!!status?.openPositions.length && (
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Otwarte pozycje PRO</Text>
           {status.openPositions.map((p) => (
             <View key={p.symbol} style={styles.position}>
               <Text style={styles.positionSymbol}>{p.symbol} • {p.setup}</Text>
-              <Text style={styles.positionLine}>entry {p.entryPrice} • mark {p.markPrice} • TP {p.targetPct.toFixed(2)}% • SL {p.stopPct.toFixed(2)}%</Text>
+              <Text style={styles.positionLine}>entry {p.entryPrice} • mark {p.markPrice} • TP {p.targetPct.toFixed(2)}% • SL {p.stopPct.toFixed(2)}%{p.aiConfidence ? ` • AI ${(p.aiConfidence * 100).toFixed(1)}%` : ''}</Text>
               <Text style={[styles.positionPnl, { color: p.pnl >= 0 ? '#00E676' : '#FF5252' }]}>{p.pnl >= 0 ? '+' : ''}{p.pnl.toFixed(4)} USDT</Text>
             </View>
           ))}
@@ -144,8 +164,8 @@ export const ProEngineScreen: React.FC = () => {
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Sterowanie</Text>
-        <Text style={styles.warning}>Tryb AUTONOMICZNY jest domyślny. START służy do wznowienia po ręcznym STOP. Cel +10 USDT/dzień jest celem pracy silnika, nie gwarancją wyniku; po osiągnięciu celu bot blokuje nowe wejścia do następnego dnia.</Text>
-        <TouchableOpacity style={styles.start} onPress={() => { void command('START'); }}><Text style={styles.actionText}>START PRO ENGINE</Text></TouchableOpacity>
+        <Text style={styles.warning}>Tryb AUTONOMICZNY jest domyślny. START służy do wznowienia po ręcznym STOP. AI uczy się z rzeczywistych zamkniętych transakcji, ale wynik nie jest gwarantowany. Cel +10 USDT/dzień jest limitem/celem sesji, nie obietnicą stałego zysku.</Text>
+        <TouchableOpacity style={styles.start} onPress={() => { void command('START'); }}><Text style={styles.actionText}>START AI ENGINE</Text></TouchableOpacity>
         <TouchableOpacity style={styles.stop} onPress={() => { void command('STOP'); }}><Text style={styles.actionText}>STOP NOWYCH WEJŚĆ</Text></TouchableOpacity>
         <TouchableOpacity style={styles.profit} onPress={() => { void command('CLOSE_PROFITABLE'); }}><Text style={styles.actionText}>UWOLNIJ DODATNIE POZYCJE</Text></TouchableOpacity>
         <TouchableOpacity style={styles.close} onPress={() => {
