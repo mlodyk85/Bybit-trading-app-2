@@ -124,6 +124,7 @@ export const ProEngineScreen: React.FC = () => {
               <Text style={styles.metric}>Pozycje {status.openPositions.length}/{status.maxOpen}</Text>
             </View>
             <Text style={styles.hint}>Rezerwa USDT: {status.reservePct}% equity • stake: {status.stakePct}% equity • transakcje dziś: {status.tradesToday}</Text>
+            <Text style={styles.hint}>AI universe: {status.universeSize || status.universe?.length || 0} par • min. oczekiwany NET: {(status.minExpectedNetUsdt || 0).toFixed(2)} USDT</Text>
             <Text style={styles.hint}>Ostatnia akcja: {status.lastAction}</Text>
           </>
         ) : <Text style={styles.hint}>Uruchom PRO Engine na MacBooku/VPS i wpisz jego adres oraz token.</Text>}
@@ -156,6 +157,7 @@ export const ProEngineScreen: React.FC = () => {
             <View key={p.symbol} style={styles.position}>
               <Text style={styles.positionSymbol}>{p.symbol} • {p.setup}</Text>
               <Text style={styles.positionLine}>entry {p.entryPrice} • mark {p.markPrice} • TP {p.targetPct.toFixed(2)}% • SL {p.stopPct.toFixed(2)}%{p.aiConfidence ? ` • AI ${(p.aiConfidence * 100).toFixed(1)}%` : ''}</Text>
+              <Text style={styles.positionLine}>Est. NET +{(p.expectedNetUsdt || 0).toFixed(3)} USDT • est. czas {(p.expectedHoldMinutes || 0).toFixed(0)} min</Text>
               <Text style={[styles.positionPnl, { color: p.pnl >= 0 ? '#00E676' : '#FF5252' }]}>{p.pnl >= 0 ? '+' : ''}{p.pnl.toFixed(4)} USDT</Text>
             </View>
           ))}
