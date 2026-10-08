@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-var-requires */
 const { withAndroidManifest } = require('@expo/config-plugins');
 
 module.exports = function withBackgroundActions(config) {
