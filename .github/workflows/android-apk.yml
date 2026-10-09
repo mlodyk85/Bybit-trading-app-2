@@ -42,6 +42,9 @@ jobs:
         run: |
           npx expo install expo-file-system expo-intent-launcher expo-background-fetch expo-task-manager expo-notifications expo-print expo-sharing
 
+      - name: Patch Android background actions compatibility
+        run: node scripts/patchBackgroundActions.cjs
+
       - name: Lint check
         run: npm run lint
 
