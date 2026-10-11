@@ -145,8 +145,9 @@ const SLIPPAGE_SAFETY_PCT = 0.04;
 const EXIT_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
 const SMART_MIN_TRADE_USDT = 5;
 const ACCUMULATION_MIN_COIN_GAIN_PCT = 0.15;
-const ACCUMULATION_MIN_PROFIT_PCT = 0.45;
-const ACCUMULATION_PEAK_PULLBACK_PCT = 0.10;
+const ACCUMULATION_MIN_PROFIT_PCT = 0.25;
+const ACCUMULATION_PEAK_PULLBACK_PCT = 0.06;
+const ACCUMULATION_MOMENTUM_HARVEST_PCT = 0.60;
 const ACCUMULATION_DEFAULT_SHARE = 0.05;
 const ACCUMULATION_REBUY_DROP_PCT = 0.35;
 const REBUY_COST_BUFFER_PCT = SPOT_TAKER_FEE_PCT + SLIPPAGE_SAFETY_PCT;
@@ -1210,10 +1211,11 @@ export const TradeScreen: React.FC<Props> = ({
       const sliceCost = position.costUsdt * configuredShare;
       const minSliceNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, sliceCost * (AUTO_SELL_MIN_NET_PCT / 100));
 
-      const trailingHarvest =
-        position.currentMovePct >= ACCUMULATION_MIN_PROFIT_PCT
-        && pullbackPct >= ACCUMULATION_PEAK_PULLBACK_PCT
+      const profitableWorkingSlice = position.currentMovePct >= ACCUMULATION_MIN_PROFIT_PCT
         && slicePnl >= minSliceNetProfit;
+      const confirmedPullback = pullbackPct >= ACCUMULATION_PEAK_PULLBACK_PCT;
+      const strongMomentumHarvest = position.currentMovePct >= ACCUMULATION_MOMENTUM_HARVEST_PCT;
+      const trailingHarvest = profitableWorkingSlice && (confirmedPullback || strongMomentumHarvest);
       if (!trailingHarvest) continue;
 
       const snapshot = await fetchSpotMarketSnapshot(position.symbol);
@@ -1238,7 +1240,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       sellBusyRef.current = true;
       setBusy(true);
-      setAccumulationStatus(`SMART ACTIVE: ${position.symbol} potwierdził lokalną górkę + cofnięcie. Sprzedaję ${(qty / position.qty * 100).toFixed(2)}% pozycji roboczej...`);
+      setAccumulationStatus(`SMART ACTIVE: ${position.symbol} ma dodatnią część roboczą ${position.currentMovePct.toFixed(2)}% • ${strongMomentumHarvest ? 'mocny ruch w górę' : 'cofnięcie od lokalnego szczytu'} • sprzedaję ${(qty / position.qty * 100).toFixed(2)}% do późniejszego BUY BACK...`);
       try {
         const ack = await placeSpotMarketSellBase(credentials, position.symbol, qty, 'smart');
         const fill = await waitForSpotFill(credentials, ack.orderId);
@@ -1527,7 +1529,18 @@ export const TradeScreen: React.FC<Props> = ({
 
             const freeUsdtNow = await refreshAvailableUsdt();
             const actionableSmart = smartOwned.filter((item) => isCoreAccumulationSymbol(item.symbol) && !sellLockedSymbolsRef.current.includes(item.symbol.toUpperCase()));
-            setAccumulationStatus(`SMART ACTIVE: wykryto ${smartOwned.length} pozycji, aktywnie buduję ${actionableSmart.length} CORE • część robocza ${Math.min(10, Math.max(1, toNumber(accumulationShare) || 5)).toFixed(1)}% • fundusz dokupienia ${coreAccumulationFundRef.current.toFixed(4)} USDT • wolne USDT ${freeUsdtNow.toFixed(2)}.`);
+            const readyNow = actionableSmart.filter((item) => {
+              const share = Math.min(0.10, Math.max(0.01, toNumber(accumulationShare) / 100 || ACCUMULATION_DEFAULT_SHARE));
+              const slicePnl = item.currentPnlUsdt * share;
+              const sliceCost = item.costUsdt * share;
+              const minSliceNetProfit = Math.max(AUTO_SELL_MIN_NET_USDT, sliceCost * (AUTO_SELL_MIN_NET_PCT / 100));
+              const pullback = item.peakMovePct - item.currentMovePct;
+              return item.currentMovePct >= ACCUMULATION_MIN_PROFIT_PCT
+                && slicePnl >= minSliceNetProfit
+                && (pullback >= ACCUMULATION_PEAK_PULLBACK_PCT || item.currentMovePct >= ACCUMULATION_MOMENTUM_HARVEST_PCT);
+            });
+            const lockedCore = smartOwned.filter((item) => isCoreAccumulationSymbol(item.symbol) && sellLockedSymbolsRef.current.includes(item.symbol.toUpperCase()));
+            setAccumulationStatus(`SMART ACTIVE: CORE ${actionableSmart.length} • gotowe do rotacji ${readyNow.length} • zablokowane SELL ${lockedCore.length} • część robocza ${Math.min(10, Math.max(1, toNumber(accumulationShare) || 5)).toFixed(1)}% • próg +${ACCUMULATION_MIN_PROFIT_PCT.toFixed(2)}% / mocny ruch +${ACCUMULATION_MOMENTUM_HARVEST_PCT.toFixed(2)}% • wolne USDT ${freeUsdtNow.toFixed(2)}.`);
             await sleep(900);
           } catch (e: unknown) {
             setAccumulationStatus(`SMART: błąd chwilowy — ${e instanceof Error ? e.message : 'nieznany błąd'}. Ponawiam.`);
