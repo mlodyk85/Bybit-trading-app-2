@@ -17,7 +17,7 @@ import { ApiCredentials, Position, TradeAck } from '../api/types';
 import { COIN_BUILDER_SYMBOLS, isCoreAccumulationSymbol } from '../services/coinBuilder';
 import { loadSellLockedSymbols } from '../services/tradingPreferences';
 import { activateTradingEngine, deactivateTradingEngine } from '../services/tradingForegroundService';
-import { loadTradingRunState, setTradingRunRequested } from '../services/tradingRunState';
+import { clearAllTradingRunRequests, setTradingRunRequested, TradingEngineId } from '../services/tradingRunState';
 import {
   cancelSpotOrder,
   fetchLinearPositions,
@@ -57,6 +57,18 @@ interface Props {
 }
 
 type SmartMode = 'off' | 'shadow' | 'assist' | 'aggressive' | 'rotation' | 'basket' | 'gold';
+
+function engineIdForMode(mode: SmartMode): TradingEngineId {
+  switch (mode) {
+    case 'aggressive': return 'aggressive';
+    case 'rotation': return 'rotation';
+    case 'basket': return 'futures-basket';
+    case 'gold': return 'gold';
+    case 'shadow': return 'shadow';
+    case 'assist': return 'assist';
+    default: return 'happy-hour';
+  }
+}
 
 interface SmartCandidateScore {
   market: SpotMarketCandidate;
@@ -454,7 +466,7 @@ export const TradeScreen: React.FC<Props> = ({
 
   const stopSmart = () => {
     stopRef.current = true;
-    void setTradingRunRequested('happy-hour', false);
+    void setTradingRunRequested(engineIdForMode(smartMode), false);
     setSmartStatus('STOP RĘCZNY: kończę skanowanie. Otwarte pozycje i zlecenia SELL na Bybit pozostają bez zmian.');
   };
 
@@ -1022,8 +1034,8 @@ export const TradeScreen: React.FC<Props> = ({
     // Do not keep opening new autonomous BUYs after an unprotected fill.
     accumulationStopRef.current = true;
     stopRef.current = true;
-    void setTradingRunRequested('smart', false);
-    void setTradingRunRequested('happy-hour', false);
+    void setTradingRunRequested('coin-builder', false);
+    void setTradingRunRequested(engineIdForMode(smartMode), false);
 
     return {
       protected: false,
@@ -1443,9 +1455,9 @@ export const TradeScreen: React.FC<Props> = ({
     if (accumulationRunningRef.current) return;
     accumulationRunningRef.current = true;
     accumulationStopRef.current = false;
-    void setTradingRunRequested('smart', true);
+    void setTradingRunRequested('coin-builder', true);
     if (restored) setAccumulationStatus('SMART: przywracam pracę po wznowieniu aplikacji...');
-    void activateTradingEngine('smart').then((backgroundActive) => {
+    void activateTradingEngine('coin-builder').then((backgroundActive) => {
       if (!backgroundActive) {
         setAccumulationStatus('SMART działa w aplikacji. Android helper tła jest niedostępny w tym buildzie; handel nie jest przez to zatrzymywany.');
       }
@@ -1550,7 +1562,7 @@ export const TradeScreen: React.FC<Props> = ({
       } catch (e: unknown) {
         setAccumulationStatus(`SMART: nie udało się wczytać portfela — ${e instanceof Error ? e.message : 'nieznany błąd'}.`);
       } finally {
-        await deactivateTradingEngine('smart').catch(() => undefined);
+        await deactivateTradingEngine('coin-builder').catch(() => undefined);
         accumulationRunningRef.current = false;
         setAccumulationRunning(false);
         accumulationStopRef.current = false;
@@ -1562,13 +1574,14 @@ export const TradeScreen: React.FC<Props> = ({
   const stopAccumulationEngine = () => {
     // Only this explicit user action is allowed to disable SMART.
     accumulationStopRef.current = true;
-    void setTradingRunRequested('smart', false);
+    void setTradingRunRequested('coin-builder', false);
     setAccumulationStatus('SMART: zatrzymuję własny silnik ręcznie...');
   };
 
   const startSmart = async (restored = false) => {
     if (smartRunningRef.current) return;
-    if (smartMode === 'off') return setError('HAPPY HOUR jest wyłączony. Wybierz tryb handlu.');
+    if (smartMode === 'off') return setError('Wybierz silnik handlu.');
+    const activeEngineId = engineIdForMode(smartMode);
     const requestedTrade = smartMode === 'aggressive'
       ? toNumber(aggressiveCapital)
       : smartMode === 'rotation'
@@ -1621,9 +1634,9 @@ export const TradeScreen: React.FC<Props> = ({
     if (smartMode === 'shadow' && (!Number.isFinite(virtualCapital) || virtualCapital < Math.max(10, trade))) return setError('Kapitał DEMO: minimum 10 USDT i co najmniej wartość jednej transakcji.');
 
     stopRef.current = false;
-    void setTradingRunRequested('happy-hour', true);
+    void setTradingRunRequested(activeEngineId, true);
     if (restored) setSmartStatus('HAPPY HOUR: przywracam ciągłe skanowanie po wznowieniu aplikacji...');
-    void activateTradingEngine('happy-hour').then((backgroundActive) => {
+    void activateTradingEngine(activeEngineId).then((backgroundActive) => {
       if (!backgroundActive) {
         setSmartStatus('Silnik działa w aplikacji. Android helper tła jest niedostępny w tym buildzie; nie traktuję tego jako błąd handlu.');
       }
@@ -1797,7 +1810,7 @@ export const TradeScreen: React.FC<Props> = ({
         }
       }
 
-      await deactivateTradingEngine('happy-hour').catch(() => undefined);
+      await deactivateTradingEngine(activeEngineId).catch(() => undefined);
       smartRunningRef.current = false;
       setSmartRunning(false);
       stopRef.current = false;
@@ -1807,14 +1820,10 @@ export const TradeScreen: React.FC<Props> = ({
 
   useEffect(() => {
     let mounted = true;
-    void loadTradingRunState().then((state) => {
+    void clearAllTradingRunRequests().then(() => {
       if (!mounted) return;
-      // All in-app trading engines are LEGACY/TEST. Never resume them automatically after
-      // app recreation/update: a stale flag must not start another BUY cycle in the background.
-      if (state.smart) void setTradingRunRequested('smart', false);
-      if (state.happyHour) void setTradingRunRequested('happy-hour', false);
-      setAccumulationStatus('SMART LEGACY: zatrzymany po starcie aplikacji. Uruchom tylko ręcznie.');
-      setSmartStatus('LEGACY/TEST: zatrzymany po starcie aplikacji. Główny handel 24/7 = PRO ENGINE.');
+      setAccumulationStatus('COIN BUILDER: osobny silnik, zatrzymany po starcie aplikacji.');
+      setSmartStatus('Każdy tryb ma własny lifecycle: Happy Hour / Aggressive / Rotation / Futures / Gold / Coin Builder.');
     }).catch(() => undefined);
     return () => { mounted = false; };
     // Restore once for this screen instance; engines manage their own continuous loops.
@@ -1829,7 +1838,7 @@ export const TradeScreen: React.FC<Props> = ({
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>Trading Spot</Text>
         <Text style={styles.subtitle}>Bybit Spot • ręczny handel + Smart Auto</Text>
-        <View style={styles.legacyBanner}><Text style={styles.legacyBannerTitle}>PRO ENGINE = główny tryb 24/7</Text><Text style={styles.legacyBannerText}>Tryby poniżej są LEGACY/TEST i nie uruchamiają się już automatycznie po restarcie. Do ciągłej rotacji kapitału używaj zakładki PRO.</Text></View>
+        <View style={styles.legacyBanner}><Text style={styles.legacyBannerTitle}>NIEZALEŻNE SILNIKI</Text><Text style={styles.legacyBannerText}>Happy Hour, Aggressive, Capital Rotation, Futures Basket, Gold Scalper i Coin Builder mają osobny stan pracy i własne pozycje. Start/Stop jednego trybu nie steruje pozostałymi.</Text></View>
 
         <View style={styles.quoteCard}>
           <View style={styles.quoteTop}>
