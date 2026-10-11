@@ -319,9 +319,11 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
   const [error, setError] = useState('');
   const [exporting, setExporting] = useState<'csv' | 'pdf' | null>(null);
   const [accountSnapshot, setAccountSnapshot] = useState<WalletAccountResult | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number>(0);
 
-  const load = useCallback(async (manual = false) => {
-    manual ? setRefreshing(true) : setLoading(true);
+  const load = useCallback(async (manual = false, silent = false) => {
+    if (manual) setRefreshing(true);
+    else if (!silent) setLoading(true);
     setError('');
     try {
       const endTime = Date.now();
@@ -334,6 +336,7 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
       setAccountSnapshot(wallet);
       const cutoff = endTime - RANGE_MS[range];
       setRows(fullHistory.filter((item) => Number(item.execTime) >= cutoff));
+      setLastUpdatedAt(Date.now());
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Nie udało się pobrać raportu.');
     } finally {
@@ -376,6 +379,10 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
 
   useEffect(() => {
     void load();
+    const timer = setInterval(() => {
+      void load(false, true);
+    }, 15000);
+    return () => clearInterval(timer);
   }, [load]);
 
   return (
@@ -387,7 +394,8 @@ export const ReportScreen: React.FC<Props> = ({ credentials }) => {
         <View style={styles.header}>
           <View>
             <Text style={styles.title}>Raport transakcji</Text>
-            <Text style={styles.subtitle}>Ostatnie wykonania Spot z Bybit</Text>
+            <Text style={styles.subtitle}>Ostatnie wykonania Spot z Bybit • AUTO 15 s</Text>
+            <Text style={styles.autoRefreshStamp}>{lastUpdatedAt > 0 ? `Aktualizacja: ${new Date(lastUpdatedAt).toLocaleTimeString('pl-PL')}` : 'Ładowanie danych...'}</Text>
           </View>
           <TouchableOpacity style={styles.refreshButton} onPress={() => void load(true)}>
             <Text style={styles.refreshText}>Odśwież</Text>
@@ -565,6 +573,7 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   title: { color: '#fff', fontSize: 26, fontWeight: '700' },
   subtitle: { color: '#8E8E93', marginTop: 4 },
+  autoRefreshStamp: { color: '#6EE7B7', fontSize: 11, marginTop: 3 },
   refreshButton: { backgroundColor: '#242424', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10 },
   refreshText: { color: '#F0B90B', fontWeight: '700' },
   rangeRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
