@@ -1,6 +1,14 @@
 import BackgroundService from 'react-native-background-actions';
 
-type TradingEngine = 'happy-hour' | 'smart';
+export type TradingEngine =
+  | 'happy-hour'
+  | 'assist'
+  | 'aggressive'
+  | 'rotation'
+  | 'futures-basket'
+  | 'gold'
+  | 'shadow'
+  | 'coin-builder';
 
 type BackgroundServiceLike = {
   isRunning?: () => boolean;
@@ -53,7 +61,17 @@ async function syncService(): Promise<boolean> {
   if (!serviceAvailable()) return false;
 
   if (activeEngines.size > 0) {
-    const names = Array.from(activeEngines).map((item) => item === 'happy-hour' ? 'Happy Hour' : 'SMART').join(' + ');
+    const labels: Record<TradingEngine, string> = {
+      'happy-hour': 'Happy Hour',
+      assist: 'Assist',
+      aggressive: 'Aggressive',
+      rotation: 'Capital Rotation',
+      'futures-basket': 'Futures Basket',
+      gold: 'Gold Scalper',
+      shadow: 'Shadow',
+      'coin-builder': 'Coin Builder',
+    };
+    const names = Array.from(activeEngines).map((item) => labels[item]).join(' + ');
     if (!serviceIsRunning()) {
       await service?.start?.(keepAliveTask, {
         ...options,
