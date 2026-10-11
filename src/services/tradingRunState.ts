@@ -1,31 +1,56 @@
 import * as SecureStore from 'expo-secure-store';
 
-export type TradingRunState = {
-  happyHour: boolean;
-  smart: boolean;
-};
+export type TradingEngineId =
+  | 'happy-hour'
+  | 'assist'
+  | 'aggressive'
+  | 'rotation'
+  | 'futures-basket'
+  | 'gold'
+  | 'shadow'
+  | 'coin-builder';
 
-const KEY = 'trading-run-state-v1';
-const DEFAULT_STATE: TradingRunState = { happyHour: false, smart: false };
+export type TradingRunState = Record<TradingEngineId, boolean>;
+
+const KEY = 'trading-run-state-v2';
+
+const DEFAULT_STATE: TradingRunState = {
+  'happy-hour': false,
+  assist: false,
+  aggressive: false,
+  rotation: false,
+  'futures-basket': false,
+  gold: false,
+  shadow: false,
+  'coin-builder': false,
+};
 
 export async function loadTradingRunState(): Promise<TradingRunState> {
   try {
     const raw = await SecureStore.getItemAsync(KEY);
-    if (!raw) return DEFAULT_STATE;
+    if (!raw) return { ...DEFAULT_STATE };
     const parsed = JSON.parse(raw) as Partial<TradingRunState>;
     return {
-      happyHour: parsed.happyHour === true,
-      smart: parsed.smart === true,
+      'happy-hour': parsed['happy-hour'] === true,
+      assist: parsed.assist === true,
+      aggressive: parsed.aggressive === true,
+      rotation: parsed.rotation === true,
+      'futures-basket': parsed['futures-basket'] === true,
+      gold: parsed.gold === true,
+      shadow: parsed.shadow === true,
+      'coin-builder': parsed['coin-builder'] === true,
     };
   } catch {
-    return DEFAULT_STATE;
+    return { ...DEFAULT_STATE };
   }
 }
 
-export async function setTradingRunRequested(engine: 'happy-hour' | 'smart', requested: boolean): Promise<void> {
+export async function setTradingRunRequested(engine: TradingEngineId, requested: boolean): Promise<void> {
   const current = await loadTradingRunState();
-  const next: TradingRunState = engine === 'happy-hour'
-    ? { ...current, happyHour: requested }
-    : { ...current, smart: requested };
+  const next: TradingRunState = { ...current, [engine]: requested };
   await SecureStore.setItemAsync(KEY, JSON.stringify(next));
+}
+
+export async function clearAllTradingRunRequests(): Promise<void> {
+  await SecureStore.setItemAsync(KEY, JSON.stringify(DEFAULT_STATE));
 }
