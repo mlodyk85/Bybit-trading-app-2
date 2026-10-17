@@ -187,7 +187,7 @@ export const TradeScreen: React.FC<Props> = ({
   const [pairsLoading, setPairsLoading] = useState(true);
   const [market, setMarket] = useState<SpotMarketSnapshot | null>(null);
 
-  const [smartMode, setSmartMode] = useState<SmartMode>('off');
+  const [smartMode, setSmartMode] = useState<SmartMode>('aggressive');
   const [smartRunning, setSmartRunning] = useState(false); // Happy Hour engine
   const [accumulationRunning, setAccumulationRunning] = useState(false); // Smart engine
   const [accumulationStatus, setAccumulationStatus] = useState('Gotowy');
@@ -688,9 +688,10 @@ export const TradeScreen: React.FC<Props> = ({
 
   const buyCandidate = async (candidate: SmartCandidateScore, trade: number, slots: number) => {
     if (!candidate || stopRef.current || !['assist', 'aggressive', 'rotation'].includes(smartMode)) return;
-    // Spot automation does not touch strategic CORE.
-    if (STRATEGIC_CORE_SYMBOLS.has(candidate.market.symbol)) {
-      setSmartStatus(`CORE LOCK: ${candidate.market.symbol} pominięty przez silnik handlowy — tylko akumulacja.`);
+    // AUTO SCALPER may open a NEW, isolated working lot even on CORE symbols.
+    // It never sells the historical portfolio balance: only the exact lot opened here is tracked.
+    if (STRATEGIC_CORE_SYMBOLS.has(candidate.market.symbol) && smartMode !== 'aggressive') {
+      setSmartStatus(`CORE LOCK: ${candidate.market.symbol} pominięty przez ten silnik — CORE obsługuje Coin Builder lub AUTO SCALPER fresh-lot.`);
       return;
     }
     if (livePositionsRef.current.filter((item) => !item.fromPortfolio).length >= slots) return;
@@ -793,7 +794,7 @@ export const TradeScreen: React.FC<Props> = ({
             ? (position.costUsdt + minNetProfit) / (position.qty * (1 - SPOT_MAKER_FEE_PCT / 100))
             : grossTarget;
           const desiredSellPrice = Math.max(grossTarget, makerNetTarget);
-          const exitOwner = 'happy-hour';
+          const exitOwner = STRATEGIC_CORE_SYMBOLS.has(position.symbol) ? 'smart' : 'happy-hour';
           const exit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, desiredSellPrice, exitOwner);
           const protectedCost = position.qty > 0 ? position.costUsdt * (exit.normalizedQty / position.qty) : position.costUsdt;
           trackedPosition = {
@@ -820,7 +821,7 @@ export const TradeScreen: React.FC<Props> = ({
                 ? Math.max(0.35, MARKET_ROUND_TRIP_FEE_PCT + candidate.market.spreadPct + 0.12)
                 : AUTO_SELL_PROFIT_PCT;
             const retryTarget = retryPrice * (1 + retryTargetPct / 100);
-            const exitOwner = 'happy-hour';
+            const exitOwner = STRATEGIC_CORE_SYMBOLS.has(position.symbol) ? 'smart' : 'happy-hour';
             const retryExit = await placeSpotLimitSellBase(credentials, position.symbol, position.qty, retryTarget, exitOwner);
             const protectedCost = position.qty > 0 ? position.costUsdt * (retryExit.normalizedQty / position.qty) : position.costUsdt;
             trackedPosition = {
@@ -841,7 +842,7 @@ export const TradeScreen: React.FC<Props> = ({
 
       livePositionsRef.current = [...livePositionsRef.current, trackedPosition];
       setLivePositions([...livePositionsRef.current]);
-      const liveModeName = smartMode === 'aggressive' ? 'AGGRESSIVE' : smartMode === 'rotation' ? 'CAPITAL ROTATION' : 'HAPPY HOUR';
+      const liveModeName = smartMode === 'aggressive' ? 'AUTO SCALPER' : smartMode === 'rotation' ? 'CAPITAL ROTATION' : 'HAPPY HOUR';
       if (smartMode === 'rotation') rotationCooldownRef.current.set(trackedPosition.symbol, Date.now() + ROTATION_COOLDOWN_MS);
       setSmartStatus(`${liveModeName} BUY ${trackedPosition.symbol}: ${position.costUsdt.toFixed(2)} USDT • ${exitStatus}.`);
       await refreshAvailableUsdt();
@@ -1871,24 +1872,20 @@ export const TradeScreen: React.FC<Props> = ({
         <View style={styles.smartCard}>
           <View style={styles.smartHeader}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.smartTitle}>HAPPY HOUR — TRYB HANDLU</Text>
-              <Text style={styles.smartSub}>Wybierz tryb poniżej. Panel jest zawsze otwarty.</Text>
+              <Text style={styles.smartTitle}>AUTO SCALPER / GOLD</Text>
+              <Text style={styles.smartSub}>Dwa niezależne zastosowania. Coin Builder jest osobno niżej.</Text>
             </View>
             <Text style={styles.modeStatus}>{smartRunning ? '● PRACUJE' : '○ GOTOWY'}</Text>
           </View>
 
-          <Text style={styles.smartNotice}>HAPPY HOUR działa niezależnie od ręcznie wybranej pary i portfela: skanuje rynek Spot/USDT, wybiera kandydatów i zarządza własnymi pozycjami. Ręczny Trade pozostaje zawsze dostępny.</Text>
+          <Text style={styles.smartNotice}>AUTO SCALPER = aktywny Spot na świeżych lotach. GOLD SCALPER = tylko XAUUSDT. Nie mieszają się z Coin Builderem ani ręcznym portfelem.</Text>
 
             <View style={styles.modeRow}>
-              <TouchableOpacity onPress={disableHappyHour} style={[styles.modeButton, styles.offModeButton, smartMode === 'off' && styles.modeSelected]}><Text style={styles.modeText}>OFF</Text></TouchableOpacity>
-              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('assist')} style={[styles.modeButton, smartMode === 'assist' && styles.modeSelected]}><Text style={styles.modeText}>HAPPY HOUR</Text></TouchableOpacity>
-              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('basket'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'basket' && styles.modeSelected]}><Text style={styles.modeText}>FUTURES BASKET</Text></TouchableOpacity>
+              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('4'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AUTO SCALPER</Text></TouchableOpacity>
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('gold'); setMaxSlots('1'); setBasketTarget('0.50'); setBasketMaxLoss('1.50'); setBasketLeverage('2'); }} style={[styles.modeButton, smartMode === 'gold' && styles.modeSelected]}><Text style={styles.modeText}>GOLD SCALPER</Text></TouchableOpacity>
-              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('rotation'); setMaxSlots('2'); }} style={[styles.modeButton, smartMode === 'rotation' && styles.modeSelected]}><Text style={styles.modeText}>CAPITAL ROTATION</Text></TouchableOpacity>
-              <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('aggressive'); setMaxSlots('6'); }} style={[styles.modeButton, smartMode === 'aggressive' && styles.modeSelected]}><Text style={styles.modeText}>AGGRESSIVE</Text></TouchableOpacity>
-              <TouchableOpacity disabled={smartRunning} onPress={() => setSmartMode('shadow')} style={[styles.modeButton, smartMode === 'shadow' && styles.modeSelected]}><Text style={styles.modeText}>DEMO</Text></TouchableOpacity>
+              <TouchableOpacity onPress={disableHappyHour} style={[styles.modeButton, styles.offModeButton, smartMode === 'off' && styles.modeSelected]}><Text style={styles.modeText}>STOP / OFF</Text></TouchableOpacity>
             </View>
-            {smartMode === 'rotation' && <>
+            {false && smartMode === 'rotation' && <>
               <Text style={styles.liquidNotice}>CAPITAL ROTATION: bot nie wykorzysta całego USDT. Blokuje nowe BUY, gdy wolne USDT spadnie poniżej 40% equity, ekspozycja Spot dojdzie do 60% albo portfel ma już zbyt wiele aktywów. Wejście wymaga spadku + potwierdzonego odbicia; każda nowa pozycja dostaje GTC SELL.</Text>
               <Text style={styles.smallLabel}>Kapitał jednej pozycji ROTATION (USDT)</Text>
               <TextInput value={rotationCapital} onChangeText={setRotationCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
@@ -1896,12 +1893,12 @@ export const TradeScreen: React.FC<Props> = ({
             </>}
 
             {smartMode === 'aggressive' && <>
-              <Text style={styles.aggressiveNotice}>AGGRESSIVE BASKET: do 6 równoległych pozycji, skan co ~0,45 s między próbkami. Po każdym BUY bot od razu wystawia GTC LIMIT SELL na Bybit, a aktywny monitoring może wcześniej zamknąć pozycję po dodatnim PnL netto.</Text>
-              <Text style={styles.smallLabel}>Kapitał AGGRESSIVE na jedną pozycję</Text>
+              <Text style={styles.aggressiveNotice}>AUTO SCALPER: aktywnie handluje świeżymi lotami na płynnych parach Spot/USDT, także BTC/XRP/ETH/SOL. Nie patrzy na historyczny minus całego portfela: liczy ruch od NOWEGO wejścia, a po BUY od razu wystawia SELL z dodatnim targetem. Starych pozycji portfelowych nie sprzedaje.</Text>
+              <Text style={styles.smallLabel}>Kapitał AUTO SCALPER na jedną pozycję</Text>
               <TextInput value={aggressiveCapital} onChangeText={setAggressiveCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
               <Text style={styles.capitalHint}>Jeśli wpiszesz więcej niż globalny limit lub wolne saldo, tryb automatycznie użyje maksymalnej dostępnej kwoty. Globalny limit: {maxOrderUsdt.toFixed(2)} USDT.</Text>
             </>}
-            {(smartMode === 'basket' || smartMode === 'gold') && <>
+            {smartMode === 'gold' && <>
               <Text style={styles.aggressiveNotice}>{smartMode === 'gold' ? 'GOLD SCALPER — XAUUSDT 24/7: sygnał nie jest już oparty na kilku tickach. Bot analizuje 1m + 5m + 15m, EMA, RSI, ATR i spread; otwiera LONG/SHORT tylko gdy kierunek jest zgodny na kilku interwałach. Zawsze tylko 1 pozycja.' : 'FUTURES BASKET — USDT PERPETUAL:'} otwiera LONG lub SHORT zależnie od krótkiego momentum. Każda pozycja używa ustawionego marginu i dźwigni. Cały koszyk jest zamykany reduce-only po osiągnięciu wspólnego TP albo SL.</Text>
               <Text style={styles.smallLabel}>Margin na jedną pozycję FUTURES</Text>
               <TextInput value={basketCapital} onChangeText={setBasketCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
@@ -1923,9 +1920,7 @@ export const TradeScreen: React.FC<Props> = ({
               <View style={styles.field}><Text style={styles.smallLabel}>Min. cykli</Text><TextInput value={maxCycles} onChangeText={setMaxCycles} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
               <View style={styles.field}><Text style={styles.smallLabel}>Równoległe sloty {smartMode === 'aggressive' || smartMode === 'basket' ? '1–6' : smartMode === 'gold' ? '1' : '1–3'}</Text><TextInput value={maxSlots} onChangeText={setMaxSlots} editable={!smartRunning} keyboardType="number-pad" style={styles.smallInput} /></View>
             </View>
-            {smartMode === 'shadow' ? (
-              <><Text style={styles.smallLabel}>Kapitał DEMO (min. 10 USDT)</Text><TextInput value={shadowCapital} onChangeText={setShadowCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} /></>
-            ) : <Text style={styles.balanceText}>Wolne USDT: {availableUsdt.toFixed(2)}</Text>}
+            <Text style={styles.balanceText}>Wolne USDT: {availableUsdt.toFixed(2)}</Text>
 
             <View style={styles.stats}>
               <Text style={styles.stat}>Cykle: {cycleCount}</Text>
@@ -1962,25 +1957,25 @@ export const TradeScreen: React.FC<Props> = ({
           {!!error && <Text style={styles.inlineStartError}>{error}</Text>}
           {smartRunning && <Text style={styles.runningHint}>Aby zmienić tryb, najpierw zatrzymaj aktualnie pracujący silnik.</Text>}
           {smartRunning
-            ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>STOP HAPPY HOUR</Text></TouchableOpacity>
+            ? <TouchableOpacity style={styles.stopButton} onPress={stopSmart}><Text style={styles.buttonText}>{smartMode === 'gold' ? 'STOP GOLD SCALPER' : 'STOP AUTO SCALPER'}</Text></TouchableOpacity>
             : smartMode === 'off'
               ? <View style={styles.offStatusBox}><Text style={styles.offStatusText}>HAPPY HOUR WYŁĄCZONY</Text></View>
-              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'assist' ? 'START HAPPY HOUR' : smartMode === 'rotation' ? 'START CAPITAL ROTATION' : smartMode === 'aggressive' ? 'START AGGRESSIVE' : smartMode === 'basket' ? 'START FUTURES BASKET' : smartMode === 'gold' ? 'START GOLD SCALPER' : 'START DEMO'}</Text></TouchableOpacity>}
+              : <TouchableOpacity style={styles.smartButton} onPress={() => { void startSmart(false); }}><Text style={styles.smartButtonText}>{smartMode === 'gold' ? 'START GOLD SCALPER' : 'START AUTO SCALPER'}</Text></TouchableOpacity>}
         </View>
 
         <View style={styles.smartCard}>
           <View style={styles.smartHeader}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.smartTitle}>SMART</Text>
-              <Text style={styles.smartSub}>Oddzielny silnik • własne pozycje • nie uruchamia i nie zatrzymuje Happy Hour</Text>
+              <Text style={styles.smartTitle}>COIN BUILDER</Text>
+              <Text style={styles.smartSub}>Oddzielny silnik akumulacji • BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO</Text>
             </View>
           </View>
-          <Text style={styles.smartNotice}>SMART ACTIVE buduje BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO przez obrót częścią roboczą 1–10%. Inne coiny mogą być widoczne w portfelu, ale ten silnik ich automatycznie nie sprzedaje. Status poniżej pokazuje teraz osobno liczbę pozycji wykrytych i liczbę faktycznie aktywnych CORE.</Text>
+          <Text style={styles.smartNotice}>COIN BUILDER zajmuje się wyłącznie zwiększaniem ilości CORE przez obrót częścią roboczą 1–10% i BUY BACK. Nie steruje AUTO SCALPEREM ani GOLD-em.</Text>
           {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
-          <Text style={styles.smallLabel}>Kapitał pierwszego/dodatkowego BUY SMART (USDT)</Text>
+          <Text style={styles.smallLabel}>Kapitał pierwszego/dodatkowego BUY COIN BUILDER (USDT)</Text>
           <TextInput value={smartSeedCapital} onChangeText={setSmartSeedCapital} editable={!accumulationRunning} keyboardType="decimal-pad" style={styles.smallInput} />
           <Text style={styles.capitalHint}>SMART może teraz sam rozpocząć pozycję BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO z wolnego USDT; nie musi czekać na zysk Happy Hour.</Text>
-          <Text style={styles.smallLabel}>Część robocza SMART (%) — 1–10%, domyślnie 5%</Text>
+          <Text style={styles.smallLabel}>Część robocza COIN BUILDER (%) — 1–10%, domyślnie 5%</Text>
           <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
           <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Wybrane do Smart: ${managedHoldings.length || (initialHolding ? 1 : 0)}`}</Text>
           <Text style={styles.accLine}>Zmiana ilości coina: {accumulatedCoin >= 0 ? '+' : ''}{accumulatedCoin.toPrecision(5)}</Text>
@@ -1991,8 +1986,8 @@ export const TradeScreen: React.FC<Props> = ({
             <Text style={styles.positionLine}>est. NET PnL {position.currentPnlUsdt >= 0 ? '+' : ''}{position.currentPnlUsdt.toFixed(4)} USDT</Text>
           </View></View>)}
           {accumulationRunning
-            ? <TouchableOpacity style={styles.stopButton} onPress={stopAccumulationEngine}><Text style={styles.buttonText}>STOP SMART</Text></TouchableOpacity>
-            : <TouchableOpacity style={styles.smartButton} onPress={() => startAccumulationEngine(false)}><Text style={styles.smartButtonText}>START CAŁY KAPITAŁ</Text></TouchableOpacity>}
+            ? <TouchableOpacity style={styles.stopButton} onPress={stopAccumulationEngine}><Text style={styles.buttonText}>STOP COIN BUILDER</Text></TouchableOpacity>
+            : <TouchableOpacity style={styles.smartButton} onPress={() => startAccumulationEngine(false)}><Text style={styles.smartButtonText}>START COIN BUILDER</Text></TouchableOpacity>}
         </View>
 
         {lastAck && <View style={styles.card}><Text style={styles.cardTitle}>Ostatnie zlecenie</Text><Text style={styles.line}>{lastAck.side} {lastAck.symbol} • {lastAck.quoteAmountUsdt.toFixed(2)} USDT</Text><Text style={styles.line}>Order ID: {lastAck.orderId}</Text></View>}
