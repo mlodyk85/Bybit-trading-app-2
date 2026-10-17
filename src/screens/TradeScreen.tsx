@@ -935,7 +935,12 @@ export const TradeScreen: React.FC<Props> = ({
 
   const executeAssistSell = async (position: TrackedPosition) => {
     if (sellBusyRef.current || position.fromPortfolio) return;
-    if (!position.sellReady || !passesNetProfitGate(position.currentPnlUsdt, position.costUsdt, LIVE_MIN_NET_PROFIT_USDT, AUTO_SELL_MIN_NET_PCT)) return;
+    // HARD NO-LOSS SELL invariant for bot-owned Spot lots:
+    // an autonomous market SELL is allowed only when the exact fresh lot is positive NET
+    // after fees/slippage. Historical portfolio drawdown is irrelevant to this lot.
+    const requiredNet = Math.max(0.03, position.costUsdt * (AUTO_SELL_MIN_NET_PCT / 100));
+    if (!position.sellReady || position.currentPnlUsdt < requiredNet) return;
+    if (!passesNetProfitGate(position.currentPnlUsdt, position.costUsdt, requiredNet, AUTO_SELL_MIN_NET_PCT)) return;
 
     sellBusyRef.current = true;
     setBusy(true);
@@ -1125,15 +1130,22 @@ export const TradeScreen: React.FC<Props> = ({
     const budget = Math.min(desiredBudget, spendable, maxOrderUsdt);
     if (budget < 5) return false;
 
-    const tracked = new Set(livePositionsRef.current.filter((item) => item.fromPortfolio).map((item) => item.symbol));
+    const activeFreshLots = new Set(
+      livePositionsRef.current
+        .filter((item) => !item.fromPortfolio && !item.closed)
+        .map((item) => item.symbol)
+    );
     const candidates: SpotMarketSnapshot[] = [];
     for (const coreSymbol of COIN_BUILDER_SYMBOLS) {
-      if (tracked.has(coreSymbol) || accumulationRef.current.has(coreSymbol)) continue;
+      if (activeFreshLots.has(coreSymbol) || accumulationRef.current.has(coreSymbol)) continue;
       try { candidates.push(await fetchSpotMarketSnapshot(coreSymbol)); } catch { /* next */ }
     }
     if (candidates.length === 0) return false;
 
-    // Prefer a coin in the lower half of its daily range, but do not require a -2% crash.
+    // RECOVERY SCALP for CORE: the old holding may be -5%, -20% or worse.
+    // We do NOT sell that old holding below its cost. Instead, we may open a NEW isolated
+    // working lot near the lower part of the daily range after a local rebound, then sell
+    // only that fresh lot above its own entry.
     const ranked = candidates
       .filter((item) => item.lastPrice > 0 && item.low24h > 0 && item.high24h > item.low24h)
       .map((item) => ({
@@ -1185,7 +1197,7 @@ export const TradeScreen: React.FC<Props> = ({
       livePositionsRef.current = [...livePositionsRef.current, protection.position];
       setLivePositions([...livePositionsRef.current]);
       setAccumulationStatus(
-        `SMART BUY ${selected.item.symbol}: ${cost.toFixed(2)} USDT • ${protection.message}`
+        `COIN BUILDER FRESH LOT ${selected.item.symbol}: ${cost.toFixed(2)} USDT • stary CORE pozostaje nietknięty • ${protection.message}`
       );
       if (!protection.protected) setError(protection.message);
       await refreshAvailableUsdt();
@@ -1970,11 +1982,11 @@ export const TradeScreen: React.FC<Props> = ({
               <Text style={styles.smartSub}>Oddzielny silnik akumulacji • BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO</Text>
             </View>
           </View>
-          <Text style={styles.smartNotice}>COIN BUILDER zajmuje się wyłącznie zwiększaniem ilości CORE przez obrót częścią roboczą 1–10% i BUY BACK. Nie steruje AUTO SCALPEREM ani GOLD-em.</Text>
+          <Text style={styles.smartNotice}>COIN BUILDER nie sprzedaje starego CORE poniżej jego ceny zakupu. Jeśli np. XRP jest nadal -5%, ale lokalnie odbija, może otworzyć NOWY mały lot po bieżącej cenie i sprzedać wyłącznie ten lot z dodatnim wynikiem netto. Dzięki temu może budować USDT/ilość coina bez realizowania starej straty.</Text>
           {sellLockedSymbols.length > 0 && <Text style={styles.sellLockInfo}>🔒 SELL zablokowany: {sellLockedSymbols.map((item) => item.replace(/USDT$/, '')).join(', ')}</Text>}
           <Text style={styles.smallLabel}>Kapitał pierwszego/dodatkowego BUY COIN BUILDER (USDT)</Text>
           <TextInput value={smartSeedCapital} onChangeText={setSmartSeedCapital} editable={!accumulationRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-          <Text style={styles.capitalHint}>SMART może teraz sam rozpocząć pozycję BTC/XRP/ETH/SOL/PEPE/FLOKI/VELO z wolnego USDT; nie musi czekać na zysk Happy Hour.</Text>
+          <Text style={styles.capitalHint}>Ten budżet służy też do świeżych recovery-lotów na coinach już posiadanych. Historyczna strata coina nie blokuje lokalnego handlu; każdy nowy lot musi mieć własny dodatni SELL.</Text>
           <Text style={styles.smallLabel}>Część robocza COIN BUILDER (%) — 1–10%, domyślnie 5%</Text>
           <TextInput value={accumulationShare} onChangeText={setAccumulationShare} keyboardType="decimal-pad" style={styles.smallInput} />
           <Text style={styles.accLine}>{accumulationCycles.length > 0 ? accumulationCycles.map((cycle) => `${cycle.symbol}: po SELL, cel odkupu ${priceText(cycle.targetBuyPrice)}`).join('\n') : `Wybrane do Smart: ${managedHoldings.length || (initialHolding ? 1 : 0)}`}</Text>
