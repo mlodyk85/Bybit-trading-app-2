@@ -1897,13 +1897,6 @@ export const TradeScreen: React.FC<Props> = ({
               <TouchableOpacity disabled={smartRunning} onPress={() => { setSmartMode('gold'); setMaxSlots('1'); setBasketTarget('0.50'); setBasketMaxLoss('1.50'); setBasketLeverage('2'); }} style={[styles.modeButton, smartMode === 'gold' && styles.modeSelected]}><Text style={styles.modeText}>GOLD SCALPER</Text></TouchableOpacity>
               <TouchableOpacity onPress={disableHappyHour} style={[styles.modeButton, styles.offModeButton, smartMode === 'off' && styles.modeSelected]}><Text style={styles.modeText}>STOP / OFF</Text></TouchableOpacity>
             </View>
-            {false && smartMode === 'rotation' && <>
-              <Text style={styles.liquidNotice}>CAPITAL ROTATION: bot nie wykorzysta całego USDT. Blokuje nowe BUY, gdy wolne USDT spadnie poniżej 40% equity, ekspozycja Spot dojdzie do 60% albo portfel ma już zbyt wiele aktywów. Wejście wymaga spadku + potwierdzonego odbicia; każda nowa pozycja dostaje GTC SELL.</Text>
-              <Text style={styles.smallLabel}>Kapitał jednej pozycji ROTATION (USDT)</Text>
-              <TextInput value={rotationCapital} onChangeText={setRotationCapital} editable={!smartRunning} keyboardType="decimal-pad" style={styles.smallInput} />
-              <Text style={styles.capitalHint}>Nie sprzedaje stratnej pozycji tylko dlatego, że jest stara. Po 24 h taka pozycja blokuje dalsze dokładanie kapitału przez limity ekspozycji.</Text>
-            </>}
-
             {smartMode === 'aggressive' && <>
               <Text style={styles.aggressiveNotice}>AUTO SCALPER: aktywnie handluje świeżymi lotami na płynnych parach Spot/USDT, także BTC/XRP/ETH/SOL. Nie patrzy na historyczny minus całego portfela: liczy ruch od NOWEGO wejścia, a po BUY od razu wystawia SELL z dodatnim targetem. Starych pozycji portfelowych nie sprzedaje.</Text>
               <Text style={styles.smallLabel}>Kapitał AUTO SCALPER na jedną pozycję</Text>
